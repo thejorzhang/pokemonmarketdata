@@ -1,0 +1,47 @@
+somethings I want to model
+
+1. Sealed Supply Analytics
+
+Decay Curves: Like we discussed, models of remaining sealed supply over time.
+
+Liquidity Scores: How easy it is to sell a given sealed product at or near market price. (Days on eBay before sold, bid-ask spreads).
+
+Scarcity Index: Combine age, opening rate, and availability into a single metric investors can compare across sets.
+
+2. Price Dynamics
+
+Volatility Tracking: Investors need to know which sets swing wildly vs. which are stable.
+
+Momentum Signals: Are sealed prices accelerating in growth or flattening?
+
+Release Cycle Effects: Many sealed products dip right after release, then climb years later. Quantify those patterns.
+
+3. Correlation & Diversification
+
+Cross-Set Correlation: Do vintage booster boxes move independently from modern sealed product, or do they all move with hype?
+
+Correlation with Other Markets: Are Pokémon prices tied to broader speculative cycles (crypto booms, stock bull markets)? Investors would love to know if Pokémon acts like a hedge or a bubble proxy.
+
+4. Return Projections
+
+Expected ROI by Product Type: Compare historical performance of ETBs vs. booster boxes vs. specialty products.
+
+Time-to-Appreciation: Quantify how long investors typically wait before sealed product begins appreciating meaningfully.
+
+Risk-Adjusted Returns: Apply Sharpe-ratio-like metrics—returns per unit of volatility.
+
+5. Market Efficiency Insights
+
+Arbitrage Opportunities: Price mismatches between eBay, TCGplayer, StockX, and auctions.
+
+Population vs. Price Imbalances: If singles from a set are heavily graded/opened but sealed remains cheap, that’s a signal.
+
+Premium Analysis: Track sealed price premium over raw singles value. If a box’s singles are worth $300 but sealed boxes sell for $600, that spread indicates investor/speculative premium.
+
+6. Structural Insights
+
+Capital Inflows: Measure growth in high-value transactions, auction house involvement, or number of six-figure sales.
+
+Investor Behavior: Is there evidence of “whale” activity? (e.g., big players cornering supply, just like funds do with thinly traded stocks).
+
+Liquidity Risks: What happens in downturns? (e.g., did modern sealed collapse faster than vintage during Pokémon’s 2021 retrace?)
