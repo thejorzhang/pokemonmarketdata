@@ -10,6 +10,10 @@ after we can accomplish this I think we have figured out how to scrape tcgplayer
 
 after that we can use the data to create implement formulas such as a time Decay
 
+some addons to think about:
+    anaconda: ease of use for libraries
+    django: web framework
+
 Goal 2: Implement formulas
 
 Goal 3: Transfer to an aesthetic visual
