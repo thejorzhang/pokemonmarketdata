@@ -1,1 +1,18 @@
 Goal 1: Get data
+
+made a script to throw names and links into a db file (idk if these even works well but I did create my first db file so yay)
+realized i would need the links
+    created a link scraper but it didn't work i'm not sure why
+    created a new script which uses selenium but on load the page brings up a white screen
+
+work for next time is to make a link scraper that puts links into the products.csv file
+after we can accomplish this I think we have figured out how to scrape tcgplayer data and can move to making the whole tcg scraper
+
+after that we can use the data to create implement formulas such as a time Decay
+
+Goal 2: Implement formulas
+
+Goal 3: Transfer to an aesthetic visual
+
+Goal 4: Publish somewhere
+

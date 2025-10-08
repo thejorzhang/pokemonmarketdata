@@ -2,6 +2,7 @@
 # tcg_scraper_basic.py
 # Simple TCGplayer scraper that logs product data into sealed_market.db
 
+from random import random
 import requests
 from bs4 import BeautifulSoup
 import sqlite3
@@ -86,6 +87,6 @@ for product in PRODUCTS:
         html = fetch_page(product["url"])
         listing_count, lowest_price = parse_tcgplayer(html)
         log_to_db(product["name"], listing_count, lowest_price, product["source"])
-        time.sleep(2)
+        time.sleep(20) + random.random()
     except Exception as e:
         print(f"Error scraping {product['name']}: {e}")
