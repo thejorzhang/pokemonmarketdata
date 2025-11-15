@@ -28,6 +28,10 @@ CREATE TABLE IF NOT EXISTS listings (
     listing_count INTEGER,
     lowest_price REAL,
     median_price REAL,
+    market_price REAL,
+    current_quantity INTEGER,
+    current_sellers INTEGER,
+    set_name TEXT,
     condition TEXT,
     source TEXT,
     FOREIGN KEY (product_id) REFERENCES products (id)
