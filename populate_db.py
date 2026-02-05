@@ -2,12 +2,13 @@
 
 Usage examples:
     python3 populate_db.py --limit 5
-    python3 populate_db.py --csv products.csv --db sealed_market.db --limit 10
+    python3 populate_db.py --csv products.csv --db sealed_market.db --limit 10 --selenium
 
 Behavior:
 - Reads CSV with header (name,url)
-- For each product, fetches page HTML (requests). On failure saves diagnostic HTML.
-- Parses a rough listing count and lowest price and inserts a snapshot into listings table.
+- For each product, fetches page HTML (requests, then Selenium if needed)
+- Parses listing count, prices, quantities, sellers, set name
+- Inserts snapshot into listings table
 """
 import csv
 import sqlite3
@@ -20,13 +21,25 @@ import os
 import json
 import re
 from datetime import datetime
+import sys
 
 
 DEFAULT_CSV = "products.csv"
 DEFAULT_DB = "sealed_market.db"
 
 
- 
+def print_progress(current, total, processed, failed, status=""):
+    """Print formatted progress bar."""
+    if total == 0:
+        pct = 0
+    else:
+        pct = int((current / total) * 100)
+    bar_len = 30
+    filled = int((pct / 100) * bar_len)
+    bar = "█" * filled + "░" * (bar_len - filled)
+    status_msg = f" | {status}" if status else ""
+    print(f"\r[{bar}] {pct}% ({current}/{total}) | Processed: {processed} | Failed: {failed}{status_msg}", end="", flush=True)
+
 try:
     # Optional selenium support for JS-rendered product pages
     from selenium import webdriver
@@ -384,6 +397,13 @@ def main():
     count_processed = 0
     count_failed = 0
 
+    # Count total rows in CSV
+    with open(args.csv, newline="", encoding="utf-8") as fh:
+        total_rows = sum(1 for _ in fh) - 1  # -1 for header
+    
+    print(f"\n🚀 Starting scrape: {total_rows} products, Selenium={'ON' if args.selenium else 'OFF'}")
+    print(f"Limit: {args.limit if args.limit else 'None (all)'}\n")
+
     with open(args.csv, newline="", encoding="utf-8") as fh:
         reader = csv.DictReader(fh)
         for i, row in enumerate(reader, start=1):
@@ -392,38 +412,30 @@ def main():
 
             name = (row.get("name") or row.get("title") or "").strip()
             url = (row.get("url") or row.get("link") or "").strip()
-            print(f"\n[{i}] Processing: {name}")
-            print(f"    URL: {url}")
+            
+            print_progress(i, total_rows, count_processed, count_failed, f"Processing: {name[:40]}")
 
             if not url:
-                print("  -> No URL, skipping")
+                count_failed += 1
                 continue
 
             # Fetch HTML
             html = fetch_page(url, headers)
-            print(f"    Fetch result: {'Got HTML (%d bytes)' % len(html) if html else 'None'}")
             
             # If requests failed, try Selenium if enabled
             if not html and args.selenium:
-                print("    -> Requests failed, trying Selenium...")
                 try:
                     html = selenium_fetch_page(url, driver, wait_selector="li.listing-item, span.price-point__data", timeout=8)
-                    if html:
-                        print(f"    Selenium result: Got HTML (%d bytes)" % len(html))
-                    else:
-                        print("    Selenium result: None")
-                except Exception as e:
-                    print("    -> Selenium fetch failed:", e)
+                except Exception:
+                    pass
             
             if not html:
-                print("  -> Failed to fetch page, saving diagnostic and continuing")
                 count_failed += 1
                 save_diagnostic("", args.diagnostics_dir, f"fetchfail_{i}")
                 time.sleep(random.uniform(args.delay_min, args.delay_max))
                 continue
 
             # Parse
-            print(f"    Parsing HTML...")
             parsed = parse_tcgplayer(html)
             
             # If parser got no data and Selenium is available, retry with Selenium (page was likely JS-rendered)
@@ -431,14 +443,12 @@ def main():
                 parsed.get('market_price') is None and 
                 parsed.get('listed_median') is None and 
                 args.selenium and driver):
-                print("    -> Parser found no data (likely JS-rendered). Retrying with Selenium...")
                 try:
                     html_selenium = selenium_fetch_page(url, driver, wait_selector=".price-points__upper__price, .price-points__lower", timeout=10)
                     if html_selenium:
-                        print(f"    Selenium retry: Got HTML (%d bytes), re-parsing..." % len(html_selenium))
                         parsed = parse_tcgplayer(html_selenium)
-                except Exception as e:
-                    print(f"    -> Selenium retry failed: {e}")
+                except Exception:
+                    pass
             
             # Insert into DB
             try:
@@ -454,10 +464,8 @@ def main():
                     current_sellers=parsed.get('current_sellers'),
                     set_name=parsed.get('set_name'),
                 )
-                print(f"  -> Logged: listings={parsed.get('listing_count')}, lowest_price={parsed.get('lowest_price')}, market=${parsed.get('market_price')}, median=${parsed.get('listed_median')}, qty={parsed.get('current_quantity')}, sellers={parsed.get('current_sellers')}, set={parsed.get('set_name')}")
                 count_processed += 1
             except Exception as e:
-                print(f"  -> DB error: {e}")
                 save_diagnostic(html, args.diagnostics_dir, f"dberror_{i}")
                 count_failed += 1
 
@@ -466,7 +474,11 @@ def main():
 
     conn.close()
 
-    print(f"Done. Processed: {count_processed}, Failed: {count_failed}")
+    print(f"\n\n✅ Complete!")
+    print(f"   Processed: {count_processed}")
+    print(f"   Failed: {count_failed}")
+    print(f"   Success Rate: {(count_processed/(count_processed+count_failed)*100):.1f}%" if count_processed+count_failed > 0 else "")
+    print(f"   DB: {args.db}\n")
 
 
 if __name__ == "__main__":

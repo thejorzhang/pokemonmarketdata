@@ -1,0 +1,14 @@
+So the code itself is made by github copilot with minimal oversight and editing(Essentially zero).
+
+This purpose of this project is to scrape data from tcgplayer to get snapshots of individual listings.
+This culminatino of all the individual snapshots will allow a user to build the shape and transformation of the market as a whole
+
+This project is broken into two parts:
+
+1. Link scraper
+    This blanket searches every listing on tcgplayer in the sealed pokemon category and compiles a csv file with every link
+2. Database populater
+    This takes those links and logs hopefully every numerical datapoint available on each listing page
+
+There are also other files as well that I let copilot make that I don't understand very well which still need to be reviewed.
+

@@ -20,3 +20,20 @@ Goal 3: Transfer to an aesthetic visual
 
 Goal 4: Publish somewhere
 
+Here are the commands to restart both:
+
+1. Restart the link scraper (scrape all product links):
+
+python3 /Users/jordanzhang/Workspace/pokemonmarketdata/link_scraper.py
+
+2. Restart the database populater (scrape all product data):
+
+python3 /Users/jordanzhang/Workspace/pokemonmarketdata/populate_db.py --selenium --limit 0
+
+Quick versions with shorter paths (if you cd into the workspace first):
+
+cd /Users/jordanzhang/Workspace/pokemonmarketdata
+python3 link_scraper.py
+python3 populate_db.py --selenium --limit 0
+
+Both will show live progress bars. Press Ctrl+C to stop either one.
