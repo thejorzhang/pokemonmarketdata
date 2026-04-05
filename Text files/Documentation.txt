@@ -9,6 +9,32 @@ This project is broken into two parts:
     This blanket searches every listing on tcgplayer in the sealed pokemon category and compiles a csv file with every link
 2. Database populater
     This takes those links and logs hopefully every numerical datapoint available on each listing page
+    It now logs scrape run metadata in `scrape_runs` and URL-level failures in `scrape_failures`.
+
+    Example:
+    `python3 populate_db.py --csv products.csv --db sealed_market.db --limit 50 --source TCGplayer --max-retries 3`
+
+    Parse quality gate:
+    snapshots are only inserted when at least one of `lowest_price`, `market_price`, or `listing_count` is parsed.
 
 There are also other files as well that I let copilot make that I don't understand very well which still need to be reviewed.
 
+3. Outlier + Insights analyzer
+    This reads historical snapshots from `sealed_market.db`, calculates price movement, and flags outliers.
+
+    Run:
+    `python3 analyze_outliers.py --db sealed_market.db --source TCGplayer --top 20`
+
+    Optional JSON output:
+    `python3 analyze_outliers.py --db sealed_market.db --source TCGplayer --output-json insights.json`
+
+4. Parser tests (fixtures)
+    `python3 -m unittest -v tests/test_parse_tcgplayer.py`
+
+5. MVP dashboard
+    Build:
+    `python3 build_dashboard.py --db sealed_market.db --source TCGplayer --out dashboard/mvp_dashboard.html`
+
+    View:
+    `python3 -m http.server 8000`
+    then open `http://localhost:8000/dashboard/mvp_dashboard.html`

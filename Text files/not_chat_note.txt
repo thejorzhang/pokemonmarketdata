@@ -37,3 +37,11 @@ python3 link_scraper.py
 python3 populate_db.py --selenium --limit 0
 
 Both will show live progress bars. Press Ctrl+C to stop either one.
+
+2/5/26
+To do:
+1. See what other data is available on the site
+2. Need to decide on database architecture
+
+Right now, all the data is one table.
+New entries/runs just add more rows

@@ -1,46 +1,306 @@
+"""Create the market tracking database schema.
 
-# create_db.py
-# This script creates a SQLite database for sealed product market tracking
+The default backend is still SQLite, but the schema bootstrap is now written
+with backend-aware helpers so it can be moved toward Postgres later without
+rewriting every call site.
+"""
 
-import sqlite3
+import argparse
 
-# Connect to (or create) the database file
-conn = sqlite3.connect("sealed_market.db")
-c = conn.cursor()
+from db import (
+    configure_connection,
+    connect_database,
+    get_dialect,
+    id_column_sql,
+    resolve_database_target,
+    table_columns,
+)
 
-# Create a table for product information
-c.execute("""
-CREATE TABLE IF NOT EXISTS products (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    url TEXT,
-    release_date TEXT,
-    sku_code TEXT
-);
-""")
 
-# Create a table for daily/periodic listings
-c.execute("""
-CREATE TABLE IF NOT EXISTS listings (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    product_id INTEGER NOT NULL,
-    timestamp TEXT NOT NULL,
-    listing_count INTEGER,
-    lowest_price REAL,
-    median_price REAL,
-    market_price REAL,
-    current_quantity INTEGER,
-    current_sellers INTEGER,
-    set_name TEXT,
-    condition TEXT,
-    source TEXT,
-    FOREIGN KEY (product_id) REFERENCES products (id)
-);
-""")
+def create_schema(conn):
+    dialect = get_dialect(conn)
+    pk = id_column_sql(dialect)
 
-# Confirm and close
-conn.commit()
-conn.close()
+    c = conn.cursor()
 
-print("Database created successfully: sealed_market.db")
+    c.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS products (
+            {pk},
+            name TEXT NOT NULL,
+            url TEXT,
+            release_date TEXT,
+            sku_code TEXT
+        )
+        """
+    )
+    c.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS listings (
+            {pk},
+            product_id INTEGER NOT NULL,
+            timestamp TEXT NOT NULL,
+            snapshot_date TEXT,
+            listing_count INTEGER,
+            lowest_price REAL,
+            lowest_shipping REAL,
+            lowest_total_price REAL,
+            median_price REAL,
+            market_price REAL,
+            current_quantity INTEGER,
+            current_sellers INTEGER,
+            set_name TEXT,
+            condition TEXT,
+            source TEXT,
+            run_id INTEGER,
+            FOREIGN KEY (product_id) REFERENCES products (id)
+        )
+        """
+    )
+    c.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS scrape_runs (
+            {pk},
+            source TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            ended_at TEXT,
+            status TEXT NOT NULL,
+            csv_path TEXT,
+            args_json TEXT,
+            attempted_count INTEGER DEFAULT 0,
+            processed_count INTEGER DEFAULT 0,
+            failed_count INTEGER DEFAULT 0,
+            parse_failed_count INTEGER DEFAULT 0
+        )
+        """
+    )
+    c.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS scrape_failures (
+            {pk},
+            run_id INTEGER NOT NULL,
+            product_name TEXT,
+            url TEXT,
+            stage TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            http_status INTEGER,
+            attempts INTEGER,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (run_id) REFERENCES scrape_runs (id)
+        )
+        """
+    )
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sales (
+            {pk},
+            product_id INTEGER NOT NULL,
+            sale_date TEXT NOT NULL,
+            condition_raw TEXT,
+            variant TEXT,
+            language TEXT,
+            quantity INTEGER,
+            purchase_price REAL,
+            shipping_price REAL,
+            listing_type TEXT,
+            title TEXT,
+            custom_listing_key TEXT,
+            custom_listing_id TEXT,
+            source TEXT NOT NULL,
+            sale_fingerprint TEXT NOT NULL,
+            scraped_at TEXT NOT NULL,
+            FOREIGN KEY (product_id) REFERENCES products (id)
+        )
+        """.format(pk=pk)
+    )
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS product_details (
+            product_id INTEGER PRIMARY KEY,
+            tcgplayer_product_id INTEGER,
+            source_url TEXT,
+            url_slug TEXT,
+            raw_title TEXT,
+            set_name TEXT,
+            product_line TEXT,
+            product_type TEXT,
+            product_subtype TEXT,
+            release_date TEXT,
+            source TEXT NOT NULL,
+            scraped_at TEXT NOT NULL,
+            FOREIGN KEY (product_id) REFERENCES products (id)
+        )
+        """
+    )
+    c.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS sets (
+            {pk},
+            name TEXT NOT NULL,
+            category_slug TEXT,
+            product_line TEXT,
+            source TEXT NOT NULL,
+            set_type TEXT,
+            release_date TEXT,
+            first_seen_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL
+        )
+        """
+    )
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS card_sales (
+            {pk},
+            card_product_id INTEGER NOT NULL,
+            sale_date TEXT NOT NULL,
+            condition_raw TEXT,
+            variant TEXT,
+            language TEXT,
+            quantity INTEGER,
+            purchase_price REAL,
+            shipping_price REAL,
+            listing_type TEXT,
+            title TEXT,
+            custom_listing_key TEXT,
+            custom_listing_id TEXT,
+            source TEXT NOT NULL,
+            sale_fingerprint TEXT NOT NULL,
+            scraped_at TEXT NOT NULL,
+            FOREIGN KEY (card_product_id) REFERENCES card_products (id)
+        )
+        """.format(pk=pk)
+    )
+    c.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS card_products (
+            {pk},
+            set_id INTEGER,
+            tcgplayer_product_id INTEGER,
+            name TEXT NOT NULL,
+            url TEXT,
+            category_slug TEXT,
+            product_line TEXT,
+            set_name TEXT,
+            source TEXT NOT NULL,
+            discovered_at TEXT NOT NULL,
+            FOREIGN KEY (set_id) REFERENCES sets (id)
+        )
+        """
+    )
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS card_details (
+            card_product_id INTEGER PRIMARY KEY,
+            tcgplayer_product_id INTEGER,
+            source_url TEXT,
+            raw_title TEXT,
+            set_name TEXT,
+            card_number TEXT,
+            rarity TEXT,
+            finish TEXT,
+            language TEXT,
+            supertype TEXT,
+            subtype TEXT,
+            release_date TEXT,
+            source TEXT NOT NULL,
+            scraped_at TEXT NOT NULL,
+            FOREIGN KEY (card_product_id) REFERENCES card_products (id)
+        )
+        """
+    )
 
+    # Backfill columns when the schema is opened against an older SQLite DB.
+    cols = table_columns(conn, "listings")
+    if "snapshot_date" not in cols:
+        c.execute("ALTER TABLE listings ADD COLUMN snapshot_date TEXT")
+        c.execute("UPDATE listings SET snapshot_date = substr(timestamp, 1, 10) WHERE snapshot_date IS NULL")
+    if "run_id" not in cols:
+        c.execute("ALTER TABLE listings ADD COLUMN run_id INTEGER")
+    if "lowest_shipping" not in cols:
+        c.execute("ALTER TABLE listings ADD COLUMN lowest_shipping REAL")
+    if "lowest_total_price" not in cols:
+        c.execute("ALTER TABLE listings ADD COLUMN lowest_total_price REAL")
+
+    sales_cols = table_columns(conn, "sales")
+    if "shipping_price" not in sales_cols:
+        c.execute("ALTER TABLE sales ADD COLUMN shipping_price REAL")
+    card_sales_cols = table_columns(conn, "card_sales")
+    if "shipping_price" not in card_sales_cols:
+        c.execute("ALTER TABLE card_sales ADD COLUMN shipping_price REAL")
+    card_product_cols = table_columns(conn, "card_products")
+    if "set_id" not in card_product_cols:
+        c.execute("ALTER TABLE card_products ADD COLUMN set_id INTEGER")
+
+    c.execute(
+        """
+        DELETE FROM listings
+        WHERE id IN (
+            SELECT older.id
+            FROM listings AS older
+            JOIN listings AS newer
+              ON older.product_id = newer.product_id
+             AND COALESCE(older.source, '') = COALESCE(newer.source, '')
+             AND older.snapshot_date = newer.snapshot_date
+             AND older.snapshot_date IS NOT NULL
+             AND (
+                 older.timestamp < newer.timestamp
+                 OR (older.timestamp = newer.timestamp AND older.id < newer.id)
+             )
+        )
+        """
+    )
+
+    # Helpful indexes for analytics and dedupe.
+    c.execute("CREATE INDEX IF NOT EXISTS idx_products_url ON products (url)")
+    c.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_products_url_unique
+        ON products (url)
+        WHERE url IS NOT NULL AND url != ''
+        """
+    )
+    c.execute("CREATE INDEX IF NOT EXISTS idx_listings_product_source_timestamp ON listings (product_id, source, timestamp)")
+    c.execute("DROP INDEX IF EXISTS idx_listings_product_source_run")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_listings_product_source_snapshot_date ON listings (product_id, source, snapshot_date)")
+    c.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_listings_product_source_snapshot_unique
+        ON listings (product_id, source, snapshot_date)
+        WHERE snapshot_date IS NOT NULL
+        """
+    )
+    c.execute("CREATE INDEX IF NOT EXISTS idx_listings_run_id ON listings (run_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_scrape_failures_run ON scrape_failures (run_id, stage, reason)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_sales_product_sale_date ON sales (product_id, sale_date)")
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_product_fingerprint_unique ON sales (product_id, sale_fingerprint)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_card_sales_product_sale_date ON card_sales (card_product_id, sale_date)")
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_card_sales_product_fingerprint_unique ON card_sales (card_product_id, sale_fingerprint)")
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sets_name_product_line_unique ON sets (name, product_line)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_sets_product_line_name ON sets (product_line, name)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_product_details_tcgplayer_product_id ON product_details (tcgplayer_product_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_card_products_tcgplayer_product_id ON card_products (tcgplayer_product_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_card_products_set_id ON card_products (set_id)")
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_card_products_url_unique ON card_products (url) WHERE url IS NOT NULL AND url != ''")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_card_details_tcgplayer_product_id ON card_details (tcgplayer_product_id)")
+
+    conn.commit()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Create or refresh the project database schema")
+    parser.add_argument("--db", default=None, help="SQLite path or postgres:// DSN. Defaults to env DATABASE_URL/DB_PATH or sealed_market.db")
+    args = parser.parse_args()
+
+    target = resolve_database_target(args.db)
+    conn = connect_database(target)
+    try:
+        configure_connection(conn)
+        create_schema(conn)
+    finally:
+        conn.close()
+
+    print(f"Database schema created successfully: {target}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

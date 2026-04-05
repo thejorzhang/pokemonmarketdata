@@ -1,0 +1,16 @@
+.DS_Store
+
+# Python cache
+__pycache__/
+tests/__pycache__/
+*.pyc
+
+# Runtime artifacts
+diagnostics/
+dashboard/
+*.db
+*.db-shm
+*.db-wal
+*.csv
+*.html
+*.json
