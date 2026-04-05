@@ -4,6 +4,7 @@ import unittest
 from card_details_refresh import (
     extract_tcgplayer_product_id,
     filter_card_products_for_shard,
+    load_missing_card_products,
     parse_card_details,
     upsert_card_details,
 )
@@ -57,6 +58,13 @@ class TestCardDetailsRefresh(unittest.TestCase):
             """
         )
         ensure_runtime_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO sets (id, name, category_slug, product_line, source, set_type, release_date, first_seen_at, last_seen_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (1, "Obsidian Flames", "pokemon", "pokemon", "src", "cards", None, "now", "now"),
+        )
         return conn
 
     def test_extract_tcgplayer_product_id(self):
@@ -113,6 +121,19 @@ class TestCardDetailsRefresh(unittest.TestCase):
             "SELECT tcgplayer_product_id, card_number, rarity, finish FROM card_details WHERE card_product_id = 1"
         ).fetchone()
         self.assertEqual(row, (123456, "125", "Illustration Rare", "reverse_holofoil"))
+
+    def test_load_missing_card_products_can_filter_by_set_name(self):
+        conn = self.make_conn()
+        conn.execute(
+            """
+            INSERT INTO card_products (
+                set_id, tcgplayer_product_id, name, url, category_slug, product_line, set_name, source, discovered_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (1, 987654, "Card A", "https://www.tcgplayer.com/product/987654/card-a", "pokemon", "pokemon", "Obsidian Flames", "src", "now"),
+        )
+        rows = load_missing_card_products(conn, set_name="Obsidian Flames")
+        self.assertEqual(len(rows), 1)
 
 
 if __name__ == "__main__":

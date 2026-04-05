@@ -30,7 +30,9 @@ def create_schema(conn):
             name TEXT NOT NULL,
             url TEXT,
             release_date TEXT,
-            sku_code TEXT
+            sku_code TEXT,
+            last_sales_refresh_at TEXT,
+            sales_backfill_completed_at TEXT
         )
         """
     )
@@ -117,6 +119,7 @@ def create_schema(conn):
         """
         CREATE TABLE IF NOT EXISTS product_details (
             product_id INTEGER PRIMARY KEY,
+            set_id INTEGER,
             tcgplayer_product_id INTEGER,
             source_url TEXT,
             url_slug TEXT,
@@ -128,7 +131,8 @@ def create_schema(conn):
             release_date TEXT,
             source TEXT NOT NULL,
             scraped_at TEXT NOT NULL,
-            FOREIGN KEY (product_id) REFERENCES products (id)
+            FOREIGN KEY (product_id) REFERENCES products (id),
+            FOREIGN KEY (set_id) REFERENCES sets (id)
         )
         """
     )
@@ -144,6 +148,24 @@ def create_schema(conn):
             release_date TEXT,
             first_seen_at TEXT NOT NULL,
             last_seen_at TEXT NOT NULL
+        )
+        """
+    )
+    c.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS scrape_activity (
+            {pk},
+            target_kind TEXT NOT NULL,
+            target_id INTEGER NOT NULL,
+            set_id INTEGER,
+            priority_tier TEXT NOT NULL,
+            priority_score REAL NOT NULL,
+            recent_sales_30d INTEGER DEFAULT 0,
+            last_sale_at TEXT,
+            last_snapshot_at TEXT,
+            next_due_at TEXT,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (set_id) REFERENCES sets (id)
         )
         """
     )
@@ -183,6 +205,8 @@ def create_schema(conn):
             set_name TEXT,
             source TEXT NOT NULL,
             discovered_at TEXT NOT NULL,
+            last_sales_refresh_at TEXT,
+            sales_backfill_completed_at TEXT,
             FOREIGN KEY (set_id) REFERENCES sets (id)
         )
         """
@@ -208,6 +232,26 @@ def create_schema(conn):
         )
         """
     )
+    c.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS refresh_priority (
+            {pk},
+            target_kind TEXT NOT NULL,
+            target_id INTEGER NOT NULL,
+            set_id INTEGER,
+            set_name TEXT,
+            activity_score REAL NOT NULL DEFAULT 0,
+            priority_tier TEXT NOT NULL DEFAULT 'dormant',
+            refresh_interval_hours INTEGER NOT NULL DEFAULT 168,
+            sales_7d INTEGER NOT NULL DEFAULT 0,
+            sales_30d INTEGER NOT NULL DEFAULT 0,
+            last_sale_at TEXT,
+            last_snapshot_at TEXT,
+            next_refresh_at TEXT,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
 
     # Backfill columns when the schema is opened against an older SQLite DB.
     cols = table_columns(conn, "listings")
@@ -227,9 +271,29 @@ def create_schema(conn):
     card_sales_cols = table_columns(conn, "card_sales")
     if "shipping_price" not in card_sales_cols:
         c.execute("ALTER TABLE card_sales ADD COLUMN shipping_price REAL")
+    product_details_cols = table_columns(conn, "product_details")
+    if "set_id" not in product_details_cols:
+        try:
+            c.execute("ALTER TABLE product_details ADD COLUMN set_id INTEGER")
+        except Exception as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
     card_product_cols = table_columns(conn, "card_products")
     if "set_id" not in card_product_cols:
-        c.execute("ALTER TABLE card_products ADD COLUMN set_id INTEGER")
+        try:
+            c.execute("ALTER TABLE card_products ADD COLUMN set_id INTEGER")
+        except Exception as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
+    product_cols = table_columns(conn, "products")
+    if "last_sales_refresh_at" not in product_cols:
+        c.execute("ALTER TABLE products ADD COLUMN last_sales_refresh_at TEXT")
+    if "sales_backfill_completed_at" not in product_cols:
+        c.execute("ALTER TABLE products ADD COLUMN sales_backfill_completed_at TEXT")
+    if "last_sales_refresh_at" not in card_product_cols:
+        c.execute("ALTER TABLE card_products ADD COLUMN last_sales_refresh_at TEXT")
+    if "sales_backfill_completed_at" not in card_product_cols:
+        c.execute("ALTER TABLE card_products ADD COLUMN sales_backfill_completed_at TEXT")
 
     c.execute(
         """
@@ -278,10 +342,16 @@ def create_schema(conn):
     c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sets_name_product_line_unique ON sets (name, product_line)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_sets_product_line_name ON sets (product_line, name)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_product_details_tcgplayer_product_id ON product_details (tcgplayer_product_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_product_details_set_id ON product_details (set_id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_card_products_tcgplayer_product_id ON card_products (tcgplayer_product_id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_card_products_set_id ON card_products (set_id)")
     c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_card_products_url_unique ON card_products (url) WHERE url IS NOT NULL AND url != ''")
     c.execute("CREATE INDEX IF NOT EXISTS idx_card_details_tcgplayer_product_id ON card_details (tcgplayer_product_id)")
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_refresh_priority_target_unique ON refresh_priority (target_kind, target_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_refresh_priority_due ON refresh_priority (target_kind, next_refresh_at, activity_score)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_refresh_priority_set ON refresh_priority (target_kind, set_id, priority_tier)")
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_scrape_activity_target_unique ON scrape_activity (target_kind, target_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_scrape_activity_set_due ON scrape_activity (set_id, next_due_at)")
 
     conn.commit()
 

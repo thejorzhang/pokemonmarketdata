@@ -81,10 +81,17 @@ def ensure_runtime_schema(conn):
             name TEXT NOT NULL,
             url TEXT,
             release_date TEXT,
-            sku_code TEXT
+            sku_code TEXT,
+            last_sales_refresh_at TEXT,
+            sales_backfill_completed_at TEXT
         )
         """.format(pk=pk)
     )
+    product_cols = table_columns(conn, "products")
+    if "last_sales_refresh_at" not in product_cols:
+        c.execute("ALTER TABLE products ADD COLUMN last_sales_refresh_at TEXT")
+    if "sales_backfill_completed_at" not in product_cols:
+        c.execute("ALTER TABLE products ADD COLUMN sales_backfill_completed_at TEXT")
     c.execute(
         """
         CREATE TABLE IF NOT EXISTS listings (
@@ -208,6 +215,7 @@ def ensure_runtime_schema(conn):
         """
         CREATE TABLE IF NOT EXISTS product_details (
             product_id INTEGER PRIMARY KEY,
+            set_id INTEGER,
             tcgplayer_product_id INTEGER,
             source_url TEXT,
             url_slug TEXT,
@@ -219,10 +227,18 @@ def ensure_runtime_schema(conn):
             release_date TEXT,
             source TEXT NOT NULL,
             scraped_at TEXT NOT NULL,
-            FOREIGN KEY (product_id) REFERENCES products (id)
+            FOREIGN KEY (product_id) REFERENCES products (id),
+            FOREIGN KEY (set_id) REFERENCES sets (id)
         )
         """
     )
+    product_details_cols = table_columns(conn, "product_details")
+    if "set_id" not in product_details_cols:
+        try:
+            c.execute("ALTER TABLE product_details ADD COLUMN set_id INTEGER")
+        except Exception as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
     c.execute(
         """
         CREATE TABLE IF NOT EXISTS sets (
@@ -240,6 +256,24 @@ def ensure_runtime_schema(conn):
     )
     c.execute(
         """
+        CREATE TABLE IF NOT EXISTS scrape_activity (
+            {pk},
+            target_kind TEXT NOT NULL,
+            target_id INTEGER NOT NULL,
+            set_id INTEGER,
+            priority_tier TEXT NOT NULL,
+            priority_score REAL NOT NULL,
+            recent_sales_30d INTEGER DEFAULT 0,
+            last_sale_at TEXT,
+            last_snapshot_at TEXT,
+            next_due_at TEXT,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (set_id) REFERENCES sets (id)
+        )
+        """.format(pk=pk)
+    )
+    c.execute(
+        """
         CREATE TABLE IF NOT EXISTS card_products (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             set_id INTEGER,
@@ -251,13 +285,23 @@ def ensure_runtime_schema(conn):
             set_name TEXT,
             source TEXT NOT NULL,
             discovered_at TEXT NOT NULL,
+            last_sales_refresh_at TEXT,
+            sales_backfill_completed_at TEXT,
             FOREIGN KEY (set_id) REFERENCES sets (id)
         )
         """
     )
     card_product_cols = table_columns(conn, "card_products")
     if "set_id" not in card_product_cols:
-        c.execute("ALTER TABLE card_products ADD COLUMN set_id INTEGER")
+        try:
+            c.execute("ALTER TABLE card_products ADD COLUMN set_id INTEGER")
+        except Exception as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
+    if "last_sales_refresh_at" not in card_product_cols:
+        c.execute("ALTER TABLE card_products ADD COLUMN last_sales_refresh_at TEXT")
+    if "sales_backfill_completed_at" not in card_product_cols:
+        c.execute("ALTER TABLE card_products ADD COLUMN sales_backfill_completed_at TEXT")
     c.execute(
         """
         CREATE TABLE IF NOT EXISTS card_details (
@@ -278,6 +322,26 @@ def ensure_runtime_schema(conn):
             FOREIGN KEY (card_product_id) REFERENCES card_products (id)
         )
         """
+    )
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS refresh_priority (
+            {pk},
+            target_kind TEXT NOT NULL,
+            target_id INTEGER NOT NULL,
+            set_id INTEGER,
+            set_name TEXT,
+            activity_score REAL NOT NULL DEFAULT 0,
+            priority_tier TEXT NOT NULL DEFAULT 'dormant',
+            refresh_interval_hours INTEGER NOT NULL DEFAULT 168,
+            sales_7d INTEGER NOT NULL DEFAULT 0,
+            sales_30d INTEGER NOT NULL DEFAULT 0,
+            last_sale_at TEXT,
+            last_snapshot_at TEXT,
+            next_refresh_at TEXT,
+            updated_at TEXT NOT NULL
+        )
+        """.format(pk=pk)
     )
     c.execute(
         """
@@ -308,6 +372,8 @@ def ensure_runtime_schema(conn):
     c.execute("CREATE INDEX IF NOT EXISTS idx_product_details_tcgplayer_product_id ON product_details (tcgplayer_product_id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_card_products_tcgplayer_product_id ON card_products (tcgplayer_product_id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_card_products_set_id ON card_products (set_id)")
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_scrape_activity_target_unique ON scrape_activity (target_kind, target_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_scrape_activity_set_due ON scrape_activity (set_id, next_due_at)")
     c.execute(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_card_products_url_unique
@@ -340,6 +406,24 @@ def ensure_runtime_schema(conn):
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_card_sales_product_fingerprint_unique
         ON card_sales (card_product_id, sale_fingerprint)
+        """
+    )
+    c.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_refresh_priority_target_unique
+        ON refresh_priority (target_kind, target_id)
+        """
+    )
+    c.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_refresh_priority_due
+        ON refresh_priority (target_kind, next_refresh_at, activity_score)
+        """
+    )
+    c.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_refresh_priority_set
+        ON refresh_priority (target_kind, set_id, priority_tier)
         """
     )
     conn.commit()
@@ -848,6 +932,28 @@ def filter_rows_for_shard(rows, shard_index=0, shard_count=1):
     return filtered
 
 
+def filter_rows_for_set(conn, rows, set_id=None, set_name=None):
+    if not set_id and not set_name:
+        return rows
+
+    query = """
+        SELECT p.url
+        FROM products p
+        JOIN product_details d ON d.product_id = p.id
+        LEFT JOIN sets s ON s.id = d.set_id
+        WHERE p.url IS NOT NULL AND p.url != ''
+    """
+    params = []
+    if set_id:
+        query += " AND d.set_id = ?"
+        params.append(int(set_id))
+    else:
+        query += " AND s.name = ?"
+        params.append(set_name)
+    allowed_urls = {row[0] for row in conn.execute(query, tuple(params)).fetchall()}
+    return [row for row in rows if (row.get("url") or row.get("link") or "").strip() in allowed_urls]
+
+
 def ensure_product(conn, cache, name, url):
     if url and url in cache["by_url"]:
         return cache["by_url"][url]
@@ -969,9 +1075,44 @@ def save_diagnostic(html, out_dir, prefix):
         return None
 
 
+def load_input_rows(conn, csv_path="", set_id=None, set_name=None):
+    csv_path = (csv_path or "").strip()
+    if csv_path and os.path.exists(csv_path):
+        with open(csv_path, newline="", encoding="utf-8") as fh:
+            rows = list(csv.DictReader(fh))
+        return filter_rows_for_set(conn, rows, set_id=set_id, set_name=set_name)
+
+    placeholder = "%s" if get_dialect(conn) == "postgres" else "?"
+    query = """
+        SELECT p.name, p.url
+        FROM products p
+        WHERE p.url IS NOT NULL
+          AND p.url != ''
+    """
+    params = []
+    if set_id:
+        query += " AND p.id IN (SELECT product_id FROM product_details WHERE set_id = {placeholder})".format(
+            placeholder=placeholder
+        )
+        params.append(int(set_id))
+    elif set_name:
+        query += """
+            AND p.id IN (
+                SELECT d.product_id
+                FROM product_details d
+                JOIN sets s ON s.id = d.set_id
+                WHERE s.name = {placeholder}
+            )
+        """.format(placeholder=placeholder)
+        params.append(set_name)
+    query += " ORDER BY p.id"
+    fetched = conn.execute(query, tuple(params)).fetchall()
+    return [{"name": row[0], "url": row[1]} for row in fetched]
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--csv", default=DEFAULT_CSV, help="CSV file with name,url columns")
+    parser.add_argument("--csv", default="", help="Optional CSV file with name,url columns; when omitted, scrape targets are loaded from the database")
     parser.add_argument("--db", default=DEFAULT_DB, help="SQLite DB file path")
     parser.add_argument("--limit", type=int, default=0, help="Limit number of products to process (0 = all)")
     parser.add_argument("--delay-min", type=float, default=2.0, help="Minimum delay between requests")
@@ -988,6 +1129,8 @@ def main():
     parser.add_argument("--commit-every", type=int, default=DEFAULT_COMMIT_EVERY, help="Commit SQLite writes every N attempts")
     parser.add_argument("--snapshot-date", default="", help="Store this run under a specific YYYY-MM-DD snapshot date")
     parser.add_argument("--debug", action="store_true", help="Show detailed fetch and Selenium debug logs")
+    parser.add_argument("--set-id", type=int, default=0)
+    parser.add_argument("--set-name", default="")
     parser.add_argument("--shard-index", type=int, default=0, help="Zero-based shard index for parallel batch workers")
     parser.add_argument("--shard-count", type=int, default=1, help="Total shard count for parallel batch workers")
     args = parser.parse_args()
@@ -1038,8 +1181,12 @@ def main():
                 print(f"Failed to start Selenium driver: {e}", flush=True)
                 selenium_enabled = False
 
-        with open(args.csv, newline="", encoding="utf-8") as fh:
-            rows = list(csv.DictReader(fh))
+        rows = load_input_rows(
+            conn,
+            csv_path=args.csv,
+            set_id=args.set_id or None,
+            set_name=args.set_name.strip() or None,
+        )
         rows = filter_rows_for_shard(rows, shard_index=args.shard_index, shard_count=args.shard_count)
         total_rows = len(rows)
         

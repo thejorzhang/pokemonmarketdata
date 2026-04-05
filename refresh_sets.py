@@ -50,6 +50,7 @@ def upsert_set(conn, name, category_slug, product_line, source, set_type, releas
 
 def refresh_sets(conn):
     sets_seen = 0
+    sealed_products_linked = 0
     card_products_linked = 0
 
     sealed_rows = conn.execute(
@@ -66,6 +67,27 @@ def refresh_sets(conn):
             continue
         upsert_set(conn, normalized, "pokemon", product_line, "TCGplayer Product Details", "sealed", release_date)
         sets_seen += 1
+
+    sealed_products = conn.execute(
+        """
+        SELECT product_id, set_name, COALESCE(product_line, 'pokemon') AS product_line
+        FROM product_details
+        WHERE set_name IS NOT NULL
+          AND set_name != ''
+        """
+    ).fetchall()
+    for product_id, set_name, product_line in sealed_products:
+        normalized = normalize_set_name(set_name)
+        if not normalized:
+            continue
+        set_row = conn.execute(
+            "SELECT id FROM sets WHERE name = ? AND COALESCE(product_line, '') = COALESCE(?, '')",
+            (normalized, product_line),
+        ).fetchone()
+        if not set_row:
+            continue
+        conn.execute("UPDATE product_details SET set_id = ? WHERE product_id = ?", (int(set_row[0]), int(product_id)))
+        sealed_products_linked += 1
 
     card_rows = conn.execute(
         """
@@ -110,7 +132,11 @@ def refresh_sets(conn):
         card_products_linked += 1
 
     conn.commit()
-    return {"sets_seen": sets_seen, "card_products_linked": card_products_linked}
+    return {
+        "sets_seen": sets_seen,
+        "sealed_products_linked": sealed_products_linked,
+        "card_products_linked": card_products_linked,
+    }
 
 
 def main():

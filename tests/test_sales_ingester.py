@@ -11,6 +11,9 @@ from sales_ingester import (
     insert_sales_rows,
     normalize_latest_sales_payload,
     sale_fingerprint,
+    should_initial_backfill,
+    target_has_completed_sales_backfill,
+    target_has_existing_sales,
 )
 
 
@@ -286,6 +289,19 @@ class TestSalesIngester(unittest.TestCase):
         self.assertEqual(len(targets), 1)
         self.assertEqual(targets[0][1], 593294)
 
+    def test_load_sales_targets_can_filter_by_card_set(self):
+        conn = self.make_card_conn()
+        conn.execute(
+            """
+            INSERT INTO sets (id, name, category_slug, product_line, source, set_type, release_date, first_seen_at, last_seen_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (7, "Obsidian Flames", "pokemon", "pokemon", "src", "cards", None, "now", "now"),
+        )
+        conn.execute("UPDATE card_products SET set_id = 7 WHERE id = 1")
+        targets = load_sales_targets(conn, target_kind="cards", set_name="Obsidian Flames")
+        self.assertEqual(len(targets), 1)
+
     def test_insert_sales_rows_for_cards_writes_to_card_sales(self):
         conn = self.make_card_conn()
         payload = self.fixture("tcgplayer_latestsales.json")
@@ -297,6 +313,102 @@ class TestSalesIngester(unittest.TestCase):
             "SELECT card_product_id, sale_date, shipping_price, source FROM card_sales ORDER BY id LIMIT 1"
         ).fetchone()
         self.assertEqual(row, (1, "2026-03-28", 0.5, "TCGplayer Cards"))
+
+    def test_target_has_existing_sales_for_cards(self):
+        conn = self.make_card_conn()
+        self.assertFalse(target_has_existing_sales(conn, 1, target_kind="cards"))
+        self.assertFalse(target_has_completed_sales_backfill(conn, 1, target_kind="cards"))
+        conn.execute(
+            """
+            INSERT INTO card_sales (card_product_id, sale_date, purchase_price, shipping_price, source, sale_fingerprint, scraped_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (1, "2026-03-28", 11.99, 0.5, "TCGplayer Cards", "existing-card-sale", "now"),
+        )
+        self.assertTrue(target_has_existing_sales(conn, 1, target_kind="cards"))
+
+    def test_ingest_latest_sales_backfills_all_returned_rows_for_first_card_refresh(self):
+        conn = self.make_card_conn()
+        payload = self.fixture("tcgplayer_latestsales.json")
+
+        from unittest.mock import patch
+
+        with patch("sales_ingester.fetch_latest_sales_json", return_value=(payload, "snapshot")):
+            result = ingest_latest_sales(
+                conn,
+                product_id=593294,
+                product_url="https://www.tcgplayer.com/product/593294/test-card",
+                sale_date="2099-01-01",
+                source="TCGplayer Cards",
+                target_kind="cards",
+            )
+
+        self.assertTrue(result["initial_backfill"])
+        self.assertEqual(result["fetched_rows"], 2)
+        self.assertEqual(result["inserted_rows"], 2)
+        self.assertTrue(target_has_completed_sales_backfill(conn, 1, target_kind="cards"))
+        refresh_row = conn.execute(
+            "SELECT last_sales_refresh_at, sales_backfill_completed_at FROM card_products WHERE id = 1"
+        ).fetchone()
+        self.assertIsNotNone(refresh_row[0])
+        self.assertIsNotNone(refresh_row[1])
+
+    def test_first_card_backfill_only_happens_once_even_with_no_sales(self):
+        conn = self.make_card_conn()
+        payload = {"data": []}
+
+        from unittest.mock import patch
+
+        with patch("sales_ingester.fetch_latest_sales_json", return_value=(payload, "snapshot")):
+            first = ingest_latest_sales(
+                conn,
+                product_id=593294,
+                product_url="https://www.tcgplayer.com/product/593294/test-card",
+                sale_date="2026-04-04",
+                source="TCGplayer Cards",
+                target_kind="cards",
+            )
+            second = ingest_latest_sales(
+                conn,
+                product_id=593294,
+                product_url="https://www.tcgplayer.com/product/593294/test-card",
+                sale_date="2026-04-04",
+                source="TCGplayer Cards",
+                target_kind="cards",
+            )
+
+        self.assertTrue(first["initial_backfill"])
+        self.assertFalse(second["initial_backfill"])
+        self.assertTrue(target_has_completed_sales_backfill(conn, 1, target_kind="cards"))
+
+    def test_card_backfill_is_skipped_before_release_date(self):
+        conn = self.make_card_conn()
+        conn.execute(
+            """
+            INSERT INTO card_details (
+                card_product_id, tcgplayer_product_id, source_url, raw_title, set_name,
+                card_number, rarity, finish, language, supertype, subtype, release_date, source, scraped_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                1,
+                593294,
+                "https://www.tcgplayer.com/product/593294/test-card",
+                "Test Card",
+                "Test Set",
+                "1/100",
+                "Rare",
+                "Normal",
+                "English",
+                "Pokemon",
+                "Basic",
+                "2026-04-10",
+                "TCGplayer Cards",
+                "now",
+            ),
+        )
+
+        self.assertFalse(should_initial_backfill(conn, 1, sale_date="2026-04-04", target_kind="cards"))
 
 
 if __name__ == "__main__":

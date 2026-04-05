@@ -122,19 +122,27 @@ def parse_card_details(html, fallback_name="", source_url="", fallback_set_name=
     }
 
 
-def load_missing_card_products(conn, limit=0):
+def load_missing_card_products(conn, limit=0, set_id=None, set_name=None):
     query = """
         SELECT p.id, p.name, p.url, p.set_name
         FROM card_products p
         LEFT JOIN card_details d ON d.card_product_id = p.id
+        LEFT JOIN sets s ON s.id = p.set_id
         WHERE d.card_product_id IS NULL
           AND p.url IS NOT NULL
           AND p.url != ''
-        ORDER BY p.id
     """
+    params = []
+    if set_id:
+        query += " AND p.set_id = ?"
+        params.append(int(set_id))
+    elif set_name:
+        query += " AND s.name = ?"
+        params.append(set_name)
+    query += " ORDER BY p.id"
     if limit and limit > 0:
         query += f" LIMIT {int(limit)}"
-    return conn.execute(query).fetchall()
+    return conn.execute(query, tuple(params)).fetchall()
 
 
 def filter_card_products_for_shard(rows, shard_index=0, shard_count=1):
@@ -211,6 +219,8 @@ def main():
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--delay-min", type=float, default=0.5)
     parser.add_argument("--delay-max", type=float, default=1.5)
+    parser.add_argument("--set-id", type=int, default=0)
+    parser.add_argument("--set-name", default="")
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--shard-count", type=int, default=1)
     args = parser.parse_args()
@@ -237,7 +247,12 @@ def main():
             print(f"Warning: Selenium unavailable, falling back to requests only ({exc})", flush=True)
             selenium_enabled = False
 
-    rows = load_missing_card_products(conn, limit=args.limit)
+    rows = load_missing_card_products(
+        conn,
+        limit=args.limit,
+        set_id=args.set_id or None,
+        set_name=args.set_name.strip() or None,
+    )
     rows = filter_card_products_for_shard(rows, shard_index=args.shard_index, shard_count=args.shard_count)
     print(
         f"Refreshing card details for {len(rows)} product(s), shard={args.shard_index + 1}/{args.shard_count}",

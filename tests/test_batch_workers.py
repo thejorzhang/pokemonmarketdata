@@ -15,7 +15,7 @@ class TestBatchWorkers(unittest.TestCase):
     def test_build_scrape_worker_command(self):
         args = Namespace(
             db="sealed_market.db",
-            csv="products.csv",
+            csv="",
             source="TCGplayer",
             snapshot_date="2026-04-01",
             commit_every=25,
@@ -28,12 +28,16 @@ class TestBatchWorkers(unittest.TestCase):
             no_selenium=False,
             headless=True,
             debug=False,
+            set_id=0,
+            set_name="Journey Together",
         )
         command = build_scrape_worker_command(args, shard_index=1, shard_count=4)
         self.assertIn("populate_db.py", command)
         self.assertIn("--headless", command)
         self.assertIn("--shard-index", command)
         self.assertIn("--shard-count", command)
+        self.assertIn("--set-name", command)
+        self.assertNotIn("--csv", command)
 
     def test_build_product_details_worker_command(self):
         args = Namespace(
@@ -46,17 +50,22 @@ class TestBatchWorkers(unittest.TestCase):
             delay_max=1.5,
             no_selenium=True,
             headless=True,
+            set_id=0,
+            set_name="Journey Together",
         )
         command = build_product_details_worker_command(args, shard_index=0, shard_count=3)
         self.assertIn("product_details_refresh.py", command)
         self.assertIn("--no-selenium", command)
         self.assertIn("--headless", command)
+        self.assertIn("--set-name", command)
 
     def test_build_sales_worker_command(self):
         args = Namespace(
             db="sealed_market.db",
             source="TCGplayer",
             target_kind="sealed",
+            set_id=12,
+            set_name="",
             product_id=0,
             product_url="",
             sale_date="2026-03-31",
@@ -73,6 +82,7 @@ class TestBatchWorkers(unittest.TestCase):
         self.assertIn("--shard-index", command)
         self.assertIn("--shard-count", command)
         self.assertIn("--target-kind", command)
+        self.assertIn("--set-id", command)
 
     def test_build_card_details_worker_command(self):
         args = Namespace(
@@ -85,11 +95,14 @@ class TestBatchWorkers(unittest.TestCase):
             delay_max=1.5,
             no_selenium=False,
             headless=True,
+            set_id=5,
+            set_name="",
         )
         command = build_card_details_worker_command(args, shard_index=1, shard_count=4)
         self.assertIn("card_details_refresh.py", command)
         self.assertIn("--headless", command)
         self.assertIn("--shard-index", command)
+        self.assertIn("--set-id", command)
 
     def test_build_catalog_worker_command(self):
         args = Namespace(
@@ -111,7 +124,7 @@ class TestBatchWorkers(unittest.TestCase):
     def test_plan_worker_commands(self):
         args = Namespace(
             db="sealed_market.db",
-            csv="products.csv",
+            csv="",
             source="TCGplayer",
             snapshot_date="2026-04-01",
             commit_every=25,

@@ -56,13 +56,22 @@ def load_existing_products(output_path):
     return products, seen_urls
 
 
-def build_search_url(page, category_slug=DEFAULT_CATEGORY_SLUG, product_line_name=DEFAULT_PRODUCT_LINE_NAME, product_type_name=DEFAULT_PRODUCT_TYPE_NAME):
+def build_search_url(
+    page,
+    category_slug=DEFAULT_CATEGORY_SLUG,
+    product_line_name=DEFAULT_PRODUCT_LINE_NAME,
+    product_type_name=DEFAULT_PRODUCT_TYPE_NAME,
+    search_query="",
+    sort_order="",
+):
     query = urlencode(
         {
             "productLineName": product_line_name,
             "page": page,
             "view": "grid",
             "ProductTypeName": product_type_name,
+            **({"q": search_query} if search_query else {}),
+            **({"sort": sort_order} if sort_order else {}),
         }
     )
     return f"https://www.tcgplayer.com/search/{category_slug}/product?{query}"
@@ -111,6 +120,8 @@ def scrape_pages(
     category_slug=DEFAULT_CATEGORY_SLUG,
     product_line_name=DEFAULT_PRODUCT_LINE_NAME,
     product_type_name=DEFAULT_PRODUCT_TYPE_NAME,
+    search_query="",
+    sort_order="",
 ):
     driver = None
     all_products = []
@@ -150,6 +161,8 @@ def scrape_pages(
                 category_slug=category_slug,
                 product_line_name=product_line_name,
                 product_type_name=product_type_name,
+                search_query=search_query,
+                sort_order=sort_order,
             )
             log(f"Opening page {page_num}: {url}")
 
@@ -323,6 +336,8 @@ def main():
     parser.add_argument("--category-slug", default=DEFAULT_CATEGORY_SLUG, help="TCGplayer search category slug, e.g. pokemon")
     parser.add_argument("--product-line-name", default=DEFAULT_PRODUCT_LINE_NAME, help="productLineName query value")
     parser.add_argument("--product-type-name", default=DEFAULT_PRODUCT_TYPE_NAME, help="ProductTypeName query value")
+    parser.add_argument("--query", default="", help="Optional search query such as a set name")
+    parser.add_argument("--sort", default="", help="Optional raw sort parameter for more consistent ordering")
     args = parser.parse_args()
 
     mode = "newest" if args.resume else args.mode
@@ -341,6 +356,8 @@ def main():
         category_slug=args.category_slug,
         product_line_name=args.product_line_name,
         product_type_name=args.product_type_name,
+        search_query=args.query,
+        sort_order=args.sort,
     )
 
 

@@ -10,11 +10,15 @@ class TestLinkScraper(unittest.TestCase):
             category_slug="magic",
             product_line_name="magic",
             product_type_name="Sealed Products",
+            search_query="Foundations",
+            sort_order="Alphabetical",
         )
         self.assertIn("/search/magic/product?", url)
         self.assertIn("productLineName=magic", url)
         self.assertIn("page=3", url)
         self.assertIn("ProductTypeName=Sealed+Products", url)
+        self.assertIn("q=Foundations", url)
+        self.assertIn("sort=Alphabetical", url)
 
     def test_filter_pages_for_shard(self):
         self.assertEqual(filter_pages_for_shard(6, shard_index=0, shard_count=2), [1, 3, 5])

@@ -70,7 +70,7 @@ def connect_database(target=None):
         if psycopg2 is not None:
             return psycopg2.connect(target)
         raise RuntimeError("Postgres target provided but psycopg/psycopg2 is not installed")
-    return sqlite3.connect(target)
+    return sqlite3.connect(target, timeout=30.0)
 
 
 def configure_connection(conn):
@@ -79,6 +79,7 @@ def configure_connection(conn):
         cursor.execute("PRAGMA foreign_keys = ON")
         cursor.execute("PRAGMA journal_mode = WAL")
         cursor.execute("PRAGMA synchronous = NORMAL")
+        cursor.execute("PRAGMA busy_timeout = 30000")
         conn.commit()
         return
 
@@ -166,4 +167,3 @@ def insert_row_returning_id(conn, table, columns, values):
 
     c.execute(sql, values)
     return c.lastrowid
-

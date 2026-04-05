@@ -150,19 +150,27 @@ def parse_product_details(html, fallback_name="", source_url=""):
     }
 
 
-def load_missing_products(conn, limit=0):
+def load_missing_products(conn, limit=0, set_id=None, set_name=None):
     query = """
         SELECT p.id, p.name, p.url
         FROM products p
         LEFT JOIN product_details d ON d.product_id = p.id
+        LEFT JOIN sets s ON s.id = d.set_id
         WHERE d.product_id IS NULL
           AND p.url IS NOT NULL
           AND p.url != ''
-        ORDER BY p.id
     """
+    params = []
+    if set_id:
+        query += " AND d.set_id = ?"
+        params.append(int(set_id))
+    elif set_name:
+        query += " AND s.name = ?"
+        params.append(set_name)
+    query += " ORDER BY p.id"
     if limit and limit > 0:
         query += f" LIMIT {int(limit)}"
-    return conn.execute(query).fetchall()
+    return conn.execute(query, tuple(params)).fetchall()
 
 
 def filter_products_for_shard(rows, shard_index=0, shard_count=1):
@@ -238,6 +246,8 @@ def main():
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--delay-min", type=float, default=0.5)
     parser.add_argument("--delay-max", type=float, default=1.5)
+    parser.add_argument("--set-id", type=int, default=0)
+    parser.add_argument("--set-name", default="")
     parser.add_argument("--shard-index", type=int, default=0, help="Zero-based shard index for parallel batch workers")
     parser.add_argument("--shard-count", type=int, default=1, help="Total shard count for parallel batch workers")
     args = parser.parse_args()
@@ -263,7 +273,12 @@ def main():
             print(f"Failed to start Selenium for product details: {exc}", flush=True)
             selenium_enabled = False
 
-    rows = load_missing_products(conn, limit=args.limit)
+    rows = load_missing_products(
+        conn,
+        limit=args.limit,
+        set_id=args.set_id or None,
+        set_name=args.set_name.strip() or None,
+    )
     rows = filter_products_for_shard(rows, shard_index=args.shard_index, shard_count=args.shard_count)
     print(f"Refreshing product details for {len(rows)} product(s)", flush=True)
 

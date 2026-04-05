@@ -4,6 +4,25 @@ from operator_console import build_command
 
 
 class TestOperatorConsole(unittest.TestCase):
+    def test_build_scrape_command_is_db_driven_by_default(self):
+        command = build_command(
+            "scrape",
+            {
+                "db": "sealed_market.db",
+                "source": "TCGplayer",
+                "snapshot_date": "2026-04-05",
+                "limit": 0,
+                "commit_every": 25,
+                "delay_min": 2.0,
+                "delay_max": 5.0,
+                "workers": 4,
+                "selenium": True,
+                "headless": True,
+            },
+        )
+        self.assertEqual(command[:3], ["python3", "batch_workers.py", "scrape"])
+        self.assertNotIn("--csv", command)
+
     def test_build_card_catalog_scrape_command_batched(self):
         command = build_command(
             "card_catalog_scrape",

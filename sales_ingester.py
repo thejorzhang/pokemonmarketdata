@@ -267,7 +267,7 @@ def filter_product_records_for_shard(rows, shard_index=0, shard_count=1):
     return filtered
 
 
-def load_sales_targets(conn, product_id=None, product_url=None, limit=0, shard_index=0, shard_count=1, target_kind="sealed"):
+def load_sales_targets(conn, product_id=None, product_url=None, limit=0, shard_index=0, shard_count=1, target_kind="sealed", set_id=None, set_name=None):
     if product_id or product_url:
         internal_product_id, tcgplayer_product_id, resolved_url = resolve_product_record(
             conn,
@@ -286,9 +286,22 @@ def load_sales_targets(conn, product_id=None, product_url=None, limit=0, shard_i
         WHERE url IS NOT NULL
           AND url != ''
           AND url LIKE {placeholder}
-        ORDER BY id
     """
-    rows = cursor.execute(query, (config["url_like"],)).fetchall()
+    params = [config["url_like"]]
+    if target_kind == "sealed" and set_id:
+        query += " AND id IN (SELECT product_id FROM product_details WHERE set_id = {placeholder})".format(placeholder=placeholder)
+        params.append(int(set_id))
+    elif target_kind == "sealed" and set_name:
+        query += " AND id IN (SELECT d.product_id FROM product_details d JOIN sets s ON s.id = d.set_id WHERE s.name = {placeholder})".format(placeholder=placeholder)
+        params.append(set_name)
+    elif target_kind == "cards" and set_id:
+        query += f" AND set_id = {placeholder}"
+        params.append(int(set_id))
+    elif target_kind == "cards" and set_name:
+        query += " AND set_id IN (SELECT id FROM sets WHERE name = {placeholder})".format(placeholder=placeholder)
+        params.append(set_name)
+    query += " ORDER BY id"
+    rows = cursor.execute(query, tuple(params)).fetchall()
     rows = filter_product_records_for_shard(rows, shard_index=shard_index, shard_count=shard_count)
     if limit and limit > 0:
         rows = rows[: int(limit)]
@@ -385,6 +398,94 @@ def insert_sales_rows(conn, product_id, rows, source="TCGplayer", target_kind="s
     return inserted
 
 
+def target_has_existing_sales(conn, product_id, target_kind="sealed"):
+    config = get_target_config(target_kind)
+    fk_column = config["fk_column"]
+    sales_table = config["sales_table"]
+    placeholder = "%s" if get_dialect(conn) == "postgres" else "?"
+    row = conn.execute(
+        f"SELECT 1 FROM {sales_table} WHERE {fk_column} = {placeholder} LIMIT 1",
+        (int(product_id),),
+    ).fetchone()
+    return row is not None
+
+
+def target_has_completed_sales_backfill(conn, product_id, target_kind="sealed"):
+    config = get_target_config(target_kind)
+    product_table = config["product_table"]
+    placeholder = "%s" if get_dialect(conn) == "postgres" else "?"
+    row = conn.execute(
+        f"SELECT sales_backfill_completed_at FROM {product_table} WHERE id = {placeholder}",
+        (int(product_id),),
+    ).fetchone()
+    return bool(row and row[0])
+
+
+def target_release_date(conn, product_id, target_kind="sealed"):
+    placeholder = "%s" if get_dialect(conn) == "postgres" else "?"
+    if target_kind == "cards":
+        row = conn.execute(
+            """
+            SELECT d.release_date
+            FROM card_products p
+            LEFT JOIN card_details d ON d.card_product_id = p.id
+            WHERE p.id = ?
+            """.replace("?", placeholder),
+            (int(product_id),),
+        ).fetchone()
+        value = row[0] if row else None
+        if value and re.match(r"^\d{4}-\d{2}-\d{2}$", str(value)):
+            return value
+        return None
+
+    row = conn.execute(
+        """
+        SELECT COALESCE(d.release_date, p.release_date)
+        FROM products p
+        LEFT JOIN product_details d ON d.product_id = p.id
+        WHERE p.id = ?
+        """.replace("?", placeholder),
+        (int(product_id),),
+    ).fetchone()
+    value = row[0] if row else None
+    if value and re.match(r"^\d{4}-\d{2}-\d{2}$", str(value)):
+        return value
+    return None
+
+
+def should_initial_backfill(conn, product_id, sale_date=None, target_kind="sealed"):
+    if target_kind != "cards" or not sale_date:
+        return False
+    if target_has_completed_sales_backfill(conn, product_id, target_kind=target_kind):
+        return False
+    release_date = target_release_date(conn, product_id, target_kind=target_kind)
+    if release_date and release_date > sale_date:
+        return False
+    return True
+
+
+def mark_sales_refresh_state(conn, product_id, target_kind="sealed", backfill_completed=False):
+    config = get_target_config(target_kind)
+    product_table = config["product_table"]
+    placeholder = "%s" if get_dialect(conn) == "postgres" else "?"
+    now = datetime.utcnow().isoformat()
+    if backfill_completed:
+        conn.execute(
+            f"""
+            UPDATE {product_table}
+               SET last_sales_refresh_at = {placeholder},
+                   sales_backfill_completed_at = COALESCE(sales_backfill_completed_at, {placeholder})
+             WHERE id = {placeholder}
+            """,
+            (now, now, int(product_id)),
+        )
+        return
+    conn.execute(
+        f"UPDATE {product_table} SET last_sales_refresh_at = {placeholder} WHERE id = {placeholder}",
+        (now, int(product_id)),
+    )
+
+
 def ingest_latest_sales(conn, product_id=None, product_url=None, sale_date=None, source="TCGplayer", use_browser_fallback=True, headless=True, target_kind="sealed"):
     internal_product_id, tcgplayer_product_id, resolved_url = resolve_product_record(
         conn,
@@ -398,15 +499,21 @@ def ingest_latest_sales(conn, product_id=None, product_url=None, sale_date=None,
         use_browser_fallback=use_browser_fallback,
         headless=headless,
     )
-    rows = normalize_latest_sales_payload(payload, sale_date=sale_date)
+    effective_sale_date = sale_date
+    initial_backfill = should_initial_backfill(conn, internal_product_id, sale_date=sale_date, target_kind=target_kind)
+    if initial_backfill:
+        effective_sale_date = None
+    rows = normalize_latest_sales_payload(payload, sale_date=effective_sale_date)
     inserted = insert_sales_rows(conn, internal_product_id, rows, source=source, target_kind=target_kind)
+    mark_sales_refresh_state(conn, internal_product_id, target_kind=target_kind, backfill_completed=initial_backfill)
     return {
         "product_id": internal_product_id,
         "tcgplayer_product_id": tcgplayer_product_id,
         "fetch_source": fetch_source,
         "fetched_rows": len(rows),
         "inserted_rows": inserted,
-        "sale_date": sale_date,
+        "sale_date": effective_sale_date,
+        "initial_backfill": initial_backfill,
     }
 
 
@@ -433,13 +540,19 @@ def ingest_sales_targets(
                 use_browser_fallback=use_browser_fallback,
                 headless=headless,
             )
-            rows = normalize_latest_sales_payload(payload, sale_date=sale_date)
+            effective_sale_date = sale_date
+            initial_backfill = should_initial_backfill(conn, internal_product_id, sale_date=sale_date, target_kind=target_kind)
+            if initial_backfill:
+                effective_sale_date = None
+            rows = normalize_latest_sales_payload(payload, sale_date=effective_sale_date)
             inserted = insert_sales_rows(conn, internal_product_id, rows, source=source, target_kind=target_kind)
+            mark_sales_refresh_state(conn, internal_product_id, target_kind=target_kind, backfill_completed=initial_backfill)
             processed += 1
             fetched_rows += len(rows)
             inserted_rows += inserted
             print(
-                f"[{index}/{len(targets)}] sales product={tcgplayer_product_id} fetched={len(rows)} inserted={inserted}",
+                f"[{index}/{len(targets)}] sales product={tcgplayer_product_id} fetched={len(rows)} inserted={inserted}"
+                + (" mode=initial_backfill" if initial_backfill else ""),
                 flush=True,
             )
         except Exception as exc:
@@ -479,6 +592,8 @@ def main():
     parser.add_argument("--snapshot-file", help="Optional JSON fixture file instead of hitting the network")
     parser.add_argument("--limit", type=int, default=0, help="Limit number of products when running whole-universe sales refresh")
     parser.add_argument("--commit-every", type=int, default=10, help="Commit DB writes every N products")
+    parser.add_argument("--set-id", type=int, default=0)
+    parser.add_argument("--set-name", default="")
     parser.add_argument("--shard-index", type=int, default=0, help="Zero-based shard index for parallel batch workers")
     parser.add_argument("--shard-count", type=int, default=1, help="Total shard count for parallel batch workers")
     args = parser.parse_args()
@@ -520,6 +635,8 @@ def main():
         shard_index=args.shard_index,
         shard_count=args.shard_count,
         target_kind=args.target_kind,
+        set_id=args.set_id or None,
+        set_name=args.set_name.strip() or None,
     )
     if args.product_id or args.product_url:
         result = ingest_latest_sales(

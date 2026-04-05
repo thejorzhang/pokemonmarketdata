@@ -12,6 +12,7 @@ import time
 import tempfile
 from pathlib import Path
 
+from db import is_sqlite_target, resolve_database_target
 
 ROOT = Path(__file__).resolve().parent
 
@@ -67,8 +68,6 @@ def build_scrape_worker_command(args, shard_index, shard_count):
         "populate_db.py",
         "--db",
         args.db,
-        "--csv",
-        args.csv,
         "--source",
         args.source,
         "--snapshot-date",
@@ -92,6 +91,12 @@ def build_scrape_worker_command(args, shard_index, shard_count):
         "--shard-count",
         str(shard_count),
     ]
+    if getattr(args, "csv", ""):
+        command.extend(["--csv", args.csv])
+    if getattr(args, "set_id", 0):
+        command.extend(["--set-id", str(int(args.set_id))])
+    elif getattr(args, "set_name", ""):
+        command.extend(["--set-name", args.set_name])
     if args.diagnostics_dir:
         command.extend(["--diagnostics-dir", args.diagnostics_dir])
     if args.no_selenium:
@@ -126,6 +131,10 @@ def build_product_details_worker_command(args, shard_index, shard_count):
         "--shard-count",
         str(shard_count),
     ]
+    if getattr(args, "set_id", 0):
+        command.extend(["--set-id", str(int(args.set_id))])
+    elif getattr(args, "set_name", ""):
+        command.extend(["--set-name", args.set_name])
     if args.no_selenium:
         command.append("--no-selenium")
     if args.headless:
@@ -156,6 +165,10 @@ def build_card_details_worker_command(args, shard_index, shard_count):
         "--shard-count",
         str(shard_count),
     ]
+    if getattr(args, "set_id", 0):
+        command.extend(["--set-id", str(int(args.set_id))])
+    elif getattr(args, "set_name", ""):
+        command.extend(["--set-name", args.set_name])
     if args.no_selenium:
         command.append("--no-selenium")
     if args.headless:
@@ -216,6 +229,10 @@ def build_sales_worker_command(args, shard_index, shard_count):
         "--shard-count",
         str(shard_count),
     ]
+    if getattr(args, "set_id", 0):
+        command.extend(["--set-id", str(int(args.set_id))])
+    elif getattr(args, "set_name", ""):
+        command.extend(["--set-name", args.set_name])
     if args.product_id:
         command.extend(["--product-id", str(args.product_id)])
     if args.product_url:
@@ -399,7 +416,7 @@ def make_parser():
 
     scrape = subparsers.add_parser("scrape", help="Run batched listing snapshots")
     scrape.add_argument("--db", default="sealed_market.db")
-    scrape.add_argument("--csv", default="products.csv")
+    scrape.add_argument("--csv", default="")
     scrape.add_argument("--source", default="TCGplayer")
     scrape.add_argument("--snapshot-date", default="")
     scrape.add_argument("--commit-every", type=int, default=25)
@@ -412,6 +429,8 @@ def make_parser():
     scrape.add_argument("--no-selenium", action="store_true")
     scrape.add_argument("--headless", action="store_true")
     scrape.add_argument("--debug", action="store_true")
+    scrape.add_argument("--set-id", type=int, default=0)
+    scrape.add_argument("--set-name", default="")
     scrape.add_argument("--workers", type=int, default=4)
     scrape.add_argument("--dry-run", action="store_true")
 
@@ -425,6 +444,8 @@ def make_parser():
     details.add_argument("--retry-backoff", type=float, default=1.25)
     details.add_argument("--no-selenium", action="store_true")
     details.add_argument("--headless", action="store_true")
+    details.add_argument("--set-id", type=int, default=0)
+    details.add_argument("--set-name", default="")
     details.add_argument("--workers", type=int, default=4)
     details.add_argument("--dry-run", action="store_true")
 
@@ -438,6 +459,8 @@ def make_parser():
     card_details.add_argument("--retry-backoff", type=float, default=1.25)
     card_details.add_argument("--no-selenium", action="store_true")
     card_details.add_argument("--headless", action="store_true")
+    card_details.add_argument("--set-id", type=int, default=0)
+    card_details.add_argument("--set-name", default="")
     card_details.add_argument("--workers", type=int, default=4)
     card_details.add_argument("--dry-run", action="store_true")
 
@@ -460,6 +483,8 @@ def make_parser():
     sales.add_argument("--db", default="sealed_market.db")
     sales.add_argument("--source", default="TCGplayer")
     sales.add_argument("--target-kind", choices=["sealed", "cards"], default="sealed")
+    sales.add_argument("--set-id", type=int, default=0)
+    sales.add_argument("--set-name", default="")
     sales.add_argument("--product-id", type=int, default=0)
     sales.add_argument("--product-url", default="")
     sales.add_argument("--sale-date", default="")
@@ -481,6 +506,14 @@ def main(argv=None):
 
     if args.task == "catalog":
         return run_catalog_batch(args)
+
+    if args.task == "scrape" and int(args.workers) > 1 and is_sqlite_target(resolve_database_target(args.db)):
+        if int(args.commit_every) != 1:
+            print(
+                "[batch] SQLite detected for batched daily scrape; forcing --commit-every 1 to reduce database lock windows.",
+                flush=True,
+            )
+            args.commit_every = 1
 
     commands = plan_worker_commands(args.task, args, args.workers)
 

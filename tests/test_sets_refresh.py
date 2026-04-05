@@ -107,6 +107,7 @@ class TestSetsRefresh(unittest.TestCase):
 
         result = refresh_sets(conn)
         self.assertGreaterEqual(result["sets_seen"], 2)
+        self.assertGreaterEqual(result["sealed_products_linked"], 1)
 
         sets = conn.execute("SELECT name, set_type FROM sets ORDER BY name").fetchall()
         self.assertIn(("Obsidian Flames", "cards"), sets)
@@ -114,6 +115,8 @@ class TestSetsRefresh(unittest.TestCase):
 
         card_row = conn.execute("SELECT set_id FROM card_products WHERE id = 1").fetchone()
         self.assertIsNotNone(card_row[0])
+        sealed_row = conn.execute("SELECT set_id FROM product_details WHERE product_id = 1").fetchone()
+        self.assertIsNotNone(sealed_row[0])
 
 
 if __name__ == "__main__":

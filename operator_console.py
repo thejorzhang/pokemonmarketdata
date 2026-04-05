@@ -345,10 +345,9 @@ HTML_PAGE = """<!doctype html>
 
           <div class="form-block">
             <h3>Daily Price Scrape</h3>
-            <p class="help">Main operator flow. Set `Workers` above 1 to fan out across shards; batch mode ignores the spot-check limit and uses the full product set.</p>
+            <p class="help">Main operator flow. This now pulls sealed scrape targets directly from the database instead of relying on `products.csv`. Set `Workers` above 1 to fan out across shards; batch mode ignores the spot-check limit and uses the tracked product set.</p>
             <div class="grid2">
               <div><label for="scrape-db">Database</label><input id="scrape-db" type="text" value="sealed_market.db" /></div>
-              <div><label for="scrape-csv">Product CSV</label><input id="scrape-csv" type="text" value="products.csv" /></div>
               <div><label for="scrape-source">Source</label><input id="scrape-source" type="text" value="TCGplayer" /></div>
               <div><label for="scrape-date">Snapshot Date</label><input id="scrape-date" type="date" /></div>
               <div><label for="scrape-limit">Limit</label><input id="scrape-limit" type="number" min="0" value="0" /></div>
@@ -688,7 +687,6 @@ HTML_PAGE = """<!doctype html>
           const workers = getNumber("scrape-workers");
           await startJob("scrape", {
             db: getText("scrape-db"),
-            csv: getText("scrape-csv"),
             source: getText("scrape-source"),
             snapshot_date: getText("scrape-date"),
             limit: workers > 1 ? 0 : getNumber("scrape-limit"),
@@ -1004,8 +1002,6 @@ def build_command(job_type, args):
                 "scrape",
                 "--db",
                 args.get("db", "sealed_market.db"),
-                "--csv",
-                args.get("csv", "products.csv"),
                 "--source",
                 args.get("source", "TCGplayer"),
                 "--snapshot-date",
@@ -1027,7 +1023,6 @@ def build_command(job_type, args):
 
         command = [python, "populate_db.py"]
         command.extend(["--db", args.get("db", "sealed_market.db")])
-        command.extend(["--csv", args.get("csv", "products.csv")])
         command.extend(["--source", args.get("source", "TCGplayer")])
         command.extend(["--snapshot-date", args.get("snapshot_date", "")])
         command.extend(["--limit", str(int(args.get("limit", 0)))])

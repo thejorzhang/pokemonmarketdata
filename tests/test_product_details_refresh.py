@@ -6,6 +6,7 @@ from populate_db import ensure_runtime_schema
 from product_details_refresh import (
     classify_product_type,
     extract_tcgplayer_product_id,
+    load_missing_products,
     parse_product_details,
     upsert_product_details,
 )
@@ -51,6 +52,13 @@ class TestProductDetailsRefresh(unittest.TestCase):
             """
         )
         ensure_runtime_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO sets (id, name, category_slug, product_line, source, set_type, release_date, first_seen_at, last_seen_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (1, "Scarlet & Violet", "pokemon", "pokemon", "src", "sealed", None, "now", "now"),
+        )
         return conn
 
     def test_extract_product_id(self):
@@ -97,6 +105,21 @@ class TestProductDetailsRefresh(unittest.TestCase):
             "SELECT tcgplayer_product_id, set_name, product_type, release_date FROM product_details WHERE product_id = 1"
         ).fetchone()
         self.assertEqual(row, (593294, "Scarlet & Violet", "booster_pack", "2026-01-17"))
+
+    def test_load_missing_products_can_filter_by_set_name(self):
+        conn = self.make_conn()
+        conn.execute("INSERT INTO products (name, url) VALUES (?, ?)", ("A", "https://www.tcgplayer.com/product/1/a"))
+        conn.execute("INSERT INTO products (name, url) VALUES (?, ?)", ("B", "https://www.tcgplayer.com/product/2/b"))
+        conn.execute(
+            """
+            INSERT INTO product_details (
+                product_id, set_id, tcgplayer_product_id, source_url, url_slug, raw_title, set_name, product_line, product_type, product_subtype, release_date, source, scraped_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (2, 1, 2, "u", "slug", "B", "Scarlet & Violet", "pokemon", "pack", None, None, "src", "now"),
+        )
+        rows = load_missing_products(conn, set_name="Scarlet & Violet")
+        self.assertEqual(rows, [])
 
 
 if __name__ == "__main__":
