@@ -26,17 +26,67 @@ import traceback
 
 # --- CONFIG ---
 OUTPUT_CSV = "products.csv"
-DEFAULT_MAX_PAGES = 108
+DEFAULT_MAX_PAGES = 140
 PRODUCT_CARD_SELECTOR = "a[data-testid^='product-card__image']"
 PRODUCT_TITLE_SELECTOR = "span.product-card__title"
 CATALOG_MODES = {"fresh", "newest", "reconcile"}
 DEFAULT_CATEGORY_SLUG = "pokemon"
 DEFAULT_PRODUCT_LINE_NAME = "pokemon"
 DEFAULT_PRODUCT_TYPE_NAME = "Sealed Products"
+EMPTY_MIDDLE_PAGE_RETRIES = 3
+FINAL_EMPTY_PAGE_PASSES = 1
 
 
 def log(message):
     print(message, flush=True)
+
+
+def find_product_cards(driver):
+    product_cards = driver.find_elements(By.CSS_SELECTOR, PRODUCT_CARD_SELECTOR)
+    if not product_cards:
+        product_cards = [
+            e for e in driver.find_elements(By.TAG_NAME, "a")
+            if "/product/" in (e.get_attribute("href") or "")
+        ]
+    return product_cards
+
+
+def collect_products_from_cards(product_cards, seen_urls):
+    discovered = []
+    for card in product_cards:
+        try:
+            href = card.get_attribute("href")
+            name = ""
+            try:
+                title_elem = card.find_element(By.CSS_SELECTOR, PRODUCT_TITLE_SELECTOR)
+                name = title_elem.text.strip()
+            except Exception:
+                pass
+            if not name:
+                try:
+                    parent = card.find_element(By.XPATH, "..")
+                    sib_title = parent.find_element(By.CSS_SELECTOR, PRODUCT_TITLE_SELECTOR)
+                    name = sib_title.text.strip()
+                except Exception:
+                    pass
+            if not name:
+                try:
+                    img = card.find_element(By.CSS_SELECTOR, "img")
+                    name = img.get_attribute("alt") or ""
+                except Exception:
+                    pass
+            if not name:
+                name = "(unknown)"
+            if href and "/product/" in href and href not in seen_urls:
+                discovered.append((name, href))
+                seen_urls.add(href)
+        except Exception:
+            continue
+    return discovered
+
+
+def is_suspicious_empty_page(page_num, min_worker_page, max_worker_page):
+    return page_num > min_worker_page and page_num < max_worker_page
 
 
 def load_existing_products(output_path):
@@ -108,12 +158,12 @@ def make_driver(headless=False):
 
 def scrape_pages(
     pages,
-    output_csv,
+    output_csv=None,
     headless=False,
     stop_on_empty=False,
     mode="fresh",
-    wait_time=60,
-    page_load_timeout=60,
+    wait_time=35,
+    page_load_timeout=40,
     retries=1,
     shard_index=0,
     shard_count=1,
@@ -126,7 +176,7 @@ def scrape_pages(
     driver = None
     all_products = []
     seen_urls = set()
-    output_path = Path(output_csv)
+    output_path = Path(output_csv) if output_csv else None
     existing_products = []
     existing_urls = set()
 
@@ -141,7 +191,7 @@ def scrape_pages(
             writer.writerow(["name", "url"])
         return
 
-    if mode in {"newest", "reconcile"} and output_path.exists():
+    if output_path and mode in {"newest", "reconcile"} and output_path.exists():
         try:
             existing_products, existing_urls = load_existing_products(output_path)
             log(f"Loaded {len(existing_products)} existing products from {output_csv}")
@@ -154,6 +204,9 @@ def scrape_pages(
     try:
         log("Starting Chrome...")
         driver = make_driver(headless=headless)
+        min_worker_page = min(worker_pages)
+        max_worker_page = max(worker_pages)
+        retry_pages = []
 
         for page_num in worker_pages:
             url = build_search_url(
@@ -219,22 +272,41 @@ def scrape_pages(
             if last_exc:
                 log(f"Giving up on page {page_num} after {retries+1} attempts: {last_exc}")
                 # persist progress and continue
-                try:
-                    with output_path.open("w", newline="", encoding="utf-8") as f:
-                        writer = csv.writer(f)
-                        writer.writerow(["name", "url"])
-                        writer.writerows(all_products)
-                    log(f"Progress saved: {len(all_products)} products so far")
-                except Exception as e:
-                    log(f"Failed to save interim CSV: {e}")
+                if output_path:
+                    try:
+                        with output_path.open("w", newline="", encoding="utf-8") as f:
+                            writer = csv.writer(f)
+                            writer.writerow(["name", "url"])
+                            writer.writerows(all_products)
+                        log(f"Observed {len(all_products)} live products so far")
+                    except Exception as e:
+                        log(f"Failed to save interim CSV: {e}")
                 continue
 
             # Collect product cards
             try:
-                product_cards = driver.find_elements(By.CSS_SELECTOR, PRODUCT_CARD_SELECTOR)
-                if not product_cards:
-                    # Try broader search for links containing /product/
-                    product_cards = [e for e in driver.find_elements(By.TAG_NAME, "a") if "/product/" in (e.get_attribute("href") or "")]
+                product_cards = find_product_cards(driver)
+
+                suspicious_empty_page = not product_cards and is_suspicious_empty_page(page_num, min_worker_page, max_worker_page)
+                if suspicious_empty_page:
+                    log(f"Page {page_num} came back empty in the middle of the catalog; retrying with extra wait")
+                    for retry_index in range(EMPTY_MIDDLE_PAGE_RETRIES):
+                        try:
+                            driver.get(url)
+                            WebDriverWait(driver, wait_time + 25).until(
+                                EC.presence_of_element_located(
+                                    (By.CSS_SELECTOR, f"{PRODUCT_CARD_SELECTOR}, {PRODUCT_TITLE_SELECTOR}")
+                                )
+                            )
+                        except Exception:
+                            pass
+                        product_cards = find_product_cards(driver)
+                        if product_cards:
+                            log(f"Recovered page {page_num} on retry {retry_index + 1}")
+                            break
+                    if not product_cards:
+                        log(f"Page {page_num} still empty after retries")
+                        retry_pages.append(page_num)
 
                 if not product_cards:
                     log(f"No products found on page {page_num}")
@@ -242,39 +314,7 @@ def scrape_pages(
                         log("stop_on_empty enabled - stopping iteration")
                         break
                 else:
-                    for card in product_cards:
-                        try:
-                            href = card.get_attribute("href")
-                            name = ""
-                            # Try to find the product name in several ways
-                            try:
-                                # 1. Direct child span
-                                title_elem = card.find_element(By.CSS_SELECTOR, PRODUCT_TITLE_SELECTOR)
-                                name = title_elem.text.strip()
-                            except Exception:
-                                pass
-                            if not name:
-                                try:
-                                    # 2. Sibling span (sometimes not a child)
-                                    parent = card.find_element(By.XPATH, "..")
-                                    sib_title = parent.find_element(By.CSS_SELECTOR, PRODUCT_TITLE_SELECTOR)
-                                    name = sib_title.text.strip()
-                                except Exception:
-                                    pass
-                            if not name:
-                                try:
-                                    # 3. Alt text of product image
-                                    img = card.find_element(By.CSS_SELECTOR, "img")
-                                    name = img.get_attribute("alt") or ""
-                                except Exception:
-                                    pass
-                            if not name:
-                                name = "(unknown)"
-                            if href and "/product/" in href and href not in seen_urls:
-                                all_products.append((name, href))
-                                seen_urls.add(href)
-                        except Exception:
-                            continue
+                    all_products.extend(collect_products_from_cards(product_cards, seen_urls))
 
             except Exception as e:
                 log(f"Error parsing products on page {page_num}: {e}")
@@ -283,18 +323,57 @@ def scrape_pages(
             time.sleep(2 + random.random() * 3)
 
             # Persist progress after each page so long runs can be resumed
-            try:
-                with output_path.open("w", newline="", encoding="utf-8") as f:
-                    writer = csv.writer(f)
-                    writer.writerow(["name", "url"])
-                    writer.writerows(all_products)
-                log(f"Progress saved: {len(all_products)} products so far")
-            except Exception as e:
-                log(f"Failed to save interim CSV: {e}")
+            if output_path:
+                try:
+                    with output_path.open("w", newline="", encoding="utf-8") as f:
+                        writer = csv.writer(f)
+                        writer.writerow(["name", "url"])
+                        writer.writerows(all_products)
+                    log(f"Observed {len(all_products)} live products so far")
+                except Exception as e:
+                    log(f"Failed to save interim CSV: {e}")
 
             # If stop_on_empty triggered a break from inner loop, break outer loop too
             if stop_on_empty and not product_cards:
                 break
+
+        if retry_pages:
+            for retry_pass in range(FINAL_EMPTY_PAGE_PASSES):
+                pending_pages = list(retry_pages)
+                retry_pages = []
+                log(f"Starting final retry pass {retry_pass + 1} for suspicious empty pages: {pending_pages}")
+                for page_num in pending_pages:
+                    url = build_search_url(
+                        page_num,
+                        category_slug=category_slug,
+                        product_line_name=product_line_name,
+                        product_type_name=product_type_name,
+                        search_query=search_query,
+                        sort_order=sort_order,
+                    )
+                    try:
+                        driver.get(url)
+                        try:
+                            WebDriverWait(driver, wait_time + 35).until(
+                                EC.presence_of_element_located(
+                                    (By.CSS_SELECTOR, f"{PRODUCT_CARD_SELECTOR}, {PRODUCT_TITLE_SELECTOR}")
+                                )
+                            )
+                        except TimeoutException:
+                            pass
+                        product_cards = find_product_cards(driver)
+                        if product_cards:
+                            log(f"Recovered page {page_num} during final retry pass")
+                            all_products.extend(collect_products_from_cards(product_cards, seen_urls))
+                        else:
+                            retry_pages.append(page_num)
+                            log(f"Page {page_num} still empty after final retry pass")
+                    except Exception as e:
+                        retry_pages.append(page_num)
+                        log(f"Final retry failed for page {page_num}: {e}")
+
+            if retry_pages:
+                log(f"Catalog crawl finished with unresolved suspicious empty pages: {retry_pages}")
 
     finally:
         if driver:
@@ -310,24 +389,28 @@ def scrape_pages(
                 f"Reconcile summary: {len(added)} added, {len(removed)} removed, {len(all_products)} current live products"
             )
 
-        with output_path.open("w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(["name", "url"])
-            writer.writerows(all_products)
-        log(f"Saved {len(all_products)} products to {output_csv}")
+        if output_path:
+            with output_path.open("w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(["name", "url"])
+                writer.writerows(all_products)
+            log(f"Wrote {len(all_products)} observed products to {output_csv}")
     except Exception as e:
-        log(f"Failed to write CSV: {e}")
+        if output_path:
+            log(f"Failed to write CSV: {e}")
+
+    return all_products
 
 
 def main():
     parser = argparse.ArgumentParser(description="Selenium TCGplayer sealed products scraper (debug-enabled)")
     parser.add_argument("--pages", type=int, default=1, help="Number of pages to fetch (default: 1 for quick test)")
-    parser.add_argument("--all", action="store_true", help="Scrape all pages (uses DEFAULT_MAX_PAGES)")
+    parser.add_argument("--all", action="store_true", help="Scrape all pages up to the current safety cap (DEFAULT_MAX_PAGES)")
     parser.add_argument("--stop-on-empty", action="store_true", help="Stop early if a page contains no products")
     parser.add_argument("--out", default=OUTPUT_CSV, help="Output CSV file")
     parser.add_argument("--headless", action="store_true", help="Run Chrome in headless mode")
-    parser.add_argument("--wait-time", type=int, default=20, help="Seconds to wait for product cards to appear")
-    parser.add_argument("--page-load-timeout", type=int, default=25, help="Seconds to wait for the page load itself")
+    parser.add_argument("--wait-time", type=int, default=35, help="Seconds to wait for product cards to appear")
+    parser.add_argument("--page-load-timeout", type=int, default=40, help="Seconds to wait for the page load itself")
     parser.add_argument("--retries", type=int, default=1, help="Retry count per page after driver/page failures")
     parser.add_argument("--mode", choices=sorted(CATALOG_MODES), default="fresh", help="Catalog refresh mode")
     parser.add_argument("--resume", action="store_true", help="Deprecated alias for --mode newest")

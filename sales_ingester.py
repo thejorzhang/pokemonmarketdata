@@ -8,11 +8,14 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
+import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
+from requests.cookies import RequestsCookieJar, create_cookie
 
 from db import (
     configure_connection as configure_db_connection,
@@ -34,6 +37,8 @@ except Exception:  # pragma: no cover - selenium is available in the working env
 
 LATEST_SALES_URL = "https://mpapi.tcgplayer.com/v2/product/{product_id}/latestsales"
 DEFAULT_MPFEV = "4961"
+DEFAULT_AUTHENTICATED_SALES_PAGE_SIZE = 25
+DEFAULT_REQUEST_TIMEOUT = 20
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
@@ -73,6 +78,118 @@ def extract_tcgplayer_product_id(url):
 
 def canonical_product_url(tcgplayer_product_id):
     return f"https://www.tcgplayer.com/product/{tcgplayer_product_id}/"
+
+
+def load_exported_session(session_file):
+    if not session_file:
+        return {"cookies": [], "local_storage": {}, "session_storage": {}}
+    payload = json.loads(Path(session_file).read_text(encoding="utf-8"))
+    if isinstance(payload, list):
+        cookies = payload
+        local_storage = {}
+        session_storage = {}
+    elif isinstance(payload, dict):
+        cookies = payload.get("cookies") or []
+        local_storage = payload.get("local_storage") or {}
+        session_storage = payload.get("session_storage") or {}
+    else:
+        raise ValueError("invalid_session_file")
+    if not isinstance(cookies, list):
+        cookies = []
+    if not isinstance(local_storage, dict):
+        local_storage = {}
+    if not isinstance(session_storage, dict):
+        session_storage = {}
+    return {
+        "cookies": cookies,
+        "local_storage": {str(k): "" if v is None else str(v) for k, v in local_storage.items()},
+        "session_storage": {str(k): "" if v is None else str(v) for k, v in session_storage.items()},
+    }
+
+
+def normalize_exported_cookie(cookie):
+    if not isinstance(cookie, dict):
+        return None
+    name = cookie.get("name")
+    value = cookie.get("value")
+    domain = cookie.get("domain")
+    if not name or value is None or not domain:
+        return None
+    normalized = {
+        "name": str(name),
+        "value": str(value),
+        "domain": str(domain),
+        "path": str(cookie.get("path") or "/"),
+    }
+    if cookie.get("expires") not in (None, "", 0, "0"):
+        try:
+            normalized["expires"] = int(float(cookie.get("expires")))
+        except Exception:
+            pass
+    if cookie.get("secure") is not None:
+        normalized["secure"] = bool(cookie.get("secure"))
+    if cookie.get("httpOnly") is not None:
+        normalized["httpOnly"] = bool(cookie.get("httpOnly"))
+    same_site = cookie.get("sameSite")
+    if same_site in ("Lax", "Strict", "None"):
+        normalized["sameSite"] = same_site
+    return normalized
+
+
+def build_requests_cookie_jar(session_file):
+    jar = RequestsCookieJar()
+    if not session_file:
+        return jar
+    session = load_exported_session(session_file)
+    for cookie in session["cookies"]:
+        normalized = normalize_exported_cookie(cookie)
+        if not normalized:
+            continue
+        jar.set(
+            normalized["name"],
+            normalized["value"],
+            domain=normalized["domain"],
+            path=normalized["path"],
+            expires=normalized.get("expires"),
+            secure=normalized.get("secure", False),
+            rest={"HttpOnly": normalized.get("httpOnly", False)},
+        )
+    return jar
+
+
+def apply_exported_session_to_driver(driver, session_file):
+    if not session_file:
+        return
+    session = load_exported_session(session_file)
+    cookies = [normalize_exported_cookie(cookie) for cookie in session["cookies"]]
+    cookies = [cookie for cookie in cookies if cookie]
+    if not cookies and not session["local_storage"] and not session["session_storage"]:
+        return
+
+    driver.execute_cdp_cmd("Network.enable", {})
+    driver.get("https://www.tcgplayer.com/")
+    if cookies:
+        driver.execute_cdp_cmd("Network.setCookies", {"cookies": cookies})
+    if session["local_storage"]:
+        driver.execute_script(
+            """
+            const entries = arguments[0];
+            for (const [key, value] of Object.entries(entries)) {
+              localStorage.setItem(key, value);
+            }
+            """,
+            session["local_storage"],
+        )
+    if session["session_storage"]:
+        driver.execute_script(
+            """
+            const entries = arguments[0];
+            for (const [key, value] of Object.entries(entries)) {
+              sessionStorage.setItem(key, value);
+            }
+            """,
+            session["session_storage"],
+        )
 
 
 def normalize_text(value):
@@ -141,7 +258,7 @@ def sale_fingerprint(row):
     return digest
 
 
-def make_driver(headless=True):
+def make_driver(headless=True, user_data_dir=None, profile_directory=None):
     if webdriver is None:
         raise RuntimeError("selenium_not_available")
     opts = Options()
@@ -151,40 +268,157 @@ def make_driver(headless=True):
     opts.add_argument("--window-size=1600,1200")
     opts.add_argument("--log-level=3")
     opts.add_argument(f"--user-agent={DEFAULT_USER_AGENT}")
+    if user_data_dir:
+        opts.add_argument(f"--user-data-dir={user_data_dir}")
+    if profile_directory:
+        opts.add_argument(f"--profile-directory={profile_directory}")
     return webdriver.Chrome(options=opts)
 
 
-def fetch_latest_sales_json(product_id, product_url=None, mpfev=DEFAULT_MPFEV, use_browser_fallback=True, headless=True):
-    endpoint = LATEST_SALES_URL.format(product_id=product_id)
+def prepare_profile_clone(user_data_dir, profile_directory=None):
+    if not user_data_dir:
+        return None, None
+    source_root = Path(user_data_dir).expanduser().resolve()
+    source_profile = source_root / (profile_directory or "Default")
+    if not source_root.exists():
+        raise RuntimeError(f"chrome_user_data_dir_missing:{source_root}")
+    if not source_profile.exists():
+        raise RuntimeError(f"chrome_profile_missing:{source_profile}")
+
+    clone_root = Path(tempfile.mkdtemp(prefix="tcgplayer-chrome-clone-"))
+    profile_name = profile_directory or "Default"
+
+    local_state = source_root / "Local State"
+    if local_state.exists():
+        shutil.copy2(local_state, clone_root / "Local State")
+
+    target_profile = clone_root / profile_name
+    ignore_names = shutil.ignore_patterns(
+        "Singleton*",
+        "lockfile",
+        "LOCK",
+        "Crashpad",
+        "Crash Reports",
+        "Code Cache",
+        "GPUCache",
+        "DawnCache",
+        "ShaderCache",
+        "BrowserMetrics",
+        "GrShaderCache",
+        "GraphiteDawnCache",
+        "*.tmp",
+    )
+    shutil.copytree(source_profile, target_profile, ignore=ignore_names, dirs_exist_ok=True)
+    return str(clone_root), profile_name
+
+
+def _next_page_value(payload):
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("nextPage")
+    if value in (None, "", 0, "0", False):
+        return None
+    return value
+
+
+def fetch_latest_sales_json(
+    product_id,
+    product_url=None,
+    mpfev=DEFAULT_MPFEV,
+    use_browser_fallback=True,
+    headless=True,
+    user_data_dir=None,
+    profile_directory=None,
+    session_file=None,
+    browser_script_timeout=None,
+    request_timeout=None,
+    request_retries=0,
+    request_retry_backoff=1.5,
+    page=None,
+    offset=None,
+    limit=None,
+    time_filter=None,
+    endpoint_override=None,
+):
+    endpoint = endpoint_override or LATEST_SALES_URL.format(product_id=product_id)
     headers = {
         "User-Agent": DEFAULT_USER_AGENT,
         "Accept": "application/json, text/plain, */*",
         "Content-Type": "application/json",
     }
-    try:
-        resp = requests.post(
-            endpoint,
-            params={"mpfev": mpfev},
-            json={"productId": product_id},
-            headers=headers,
-            timeout=20,
-        )
-        if resp.ok:
-            return resp.json(), "requests"
-    except Exception:
-        pass
+    params = {"mpfev": mpfev}
+    if page not in (None, "", 0):
+        params["page"] = page
+    requests_session = requests.Session()
+    requests_session.headers.update(headers)
+    if session_file:
+        requests_session.cookies.update(build_requests_cookie_jar(session_file))
+    request_body = {"productId": product_id}
+    if offset not in (None, "", 0):
+        request_body["offset"] = int(offset)
+    if limit not in (None, "", 0):
+        request_body["limit"] = int(limit)
+    if time_filter not in (None, ""):
+        request_body["time"] = time_filter
+
+    timeout_seconds = float(request_timeout or DEFAULT_REQUEST_TIMEOUT)
+    attempts = max(1, int(request_retries or 0) + 1)
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            resp = requests_session.post(
+                endpoint,
+                params=params,
+                json=request_body,
+                timeout=timeout_seconds,
+            )
+            if resp.ok:
+                return resp.json(), "requests"
+            last_error = RuntimeError(f"latestsales_requests_http_{resp.status_code}")
+        except Exception as exc:
+            last_error = exc
+        if attempt + 1 < attempts:
+            time.sleep(float(request_retry_backoff) ** attempt)
 
     if not use_browser_fallback:
-        raise RuntimeError("latestsales_requests_failed")
+        raise last_error or RuntimeError("latestsales_requests_failed")
 
     if product_url:
         page_url = product_url
     else:
         page_url = f"https://www.tcgplayer.com/product/{product_id}?view=sales-history"
 
-    driver = make_driver(headless=headless)
+    runtime_user_data_dir = user_data_dir
+    runtime_profile_directory = profile_directory
+    clone_root = None
+    if user_data_dir:
+        runtime_user_data_dir, runtime_profile_directory = prepare_profile_clone(
+            user_data_dir,
+            profile_directory=profile_directory,
+        )
+        clone_root = runtime_user_data_dir
+
+    driver = make_driver(
+        headless=headless,
+        user_data_dir=runtime_user_data_dir,
+        profile_directory=runtime_profile_directory,
+    )
     try:
-        driver.set_script_timeout(20)
+        if session_file:
+            apply_exported_session_to_driver(driver, session_file)
+        # Authenticated browser-context fetches can take noticeably longer
+        # than the unauthenticated request path, especially when the page is
+        # hydrating account-aware sales-history UI and paging through large
+        # full-history result sets.
+        timeout_seconds = browser_script_timeout
+        if timeout_seconds in (None, "", 0):
+            if session_file:
+                timeout_seconds = 120
+            elif user_data_dir:
+                timeout_seconds = 60
+            else:
+                timeout_seconds = 20
+        driver.set_script_timeout(int(timeout_seconds))
         driver.get(page_url)
         time.sleep(8)
         script = """
@@ -203,7 +437,30 @@ def fetch_latest_sales_json(product_id, product_url=None, mpfev=DEFAULT_MPFEV, u
           done(JSON.stringify({status: resp.status, body}));
         }).catch(err => done(JSON.stringify({error: String(err)})));
         """
-        raw = driver.execute_async_script(script, endpoint + f"?mpfev={mpfev}", int(product_id))
+        page_query = f"&page={page}" if page not in (None, "", 0) else ""
+        raw = driver.execute_async_script(script, endpoint + f"?mpfev={mpfev}{page_query}", int(product_id))
+        # Re-run with the actual request payload when offset/limit auth paging is active.
+        if any(value not in (None, "", 0) for value in (offset, limit)) or time_filter not in (None, ""):
+            raw = driver.execute_async_script(
+                """
+                const done = arguments[0];
+                fetch(arguments[1], {
+                  method: 'POST',
+                  credentials: 'include',
+                  mode: 'cors',
+                  headers: {
+                    'accept': 'application/json, text/plain, */*',
+                    'content-type': 'application/json'
+                  },
+                  body: JSON.stringify(arguments[2])
+                }).then(async resp => {
+                  const body = await resp.text();
+                  done(JSON.stringify({status: resp.status, body}));
+                }).catch(err => done(JSON.stringify({error: String(err)})));
+                """,
+                endpoint + f"?mpfev={mpfev}{page_query}",
+                request_body,
+            )
         payload = json.loads(raw)
         if payload.get("error"):
             raise RuntimeError(payload["error"])
@@ -212,9 +469,190 @@ def fetch_latest_sales_json(product_id, product_url=None, mpfev=DEFAULT_MPFEV, u
         return json.loads(payload.get("body") or "{}"), "selenium"
     finally:
         driver.quit()
+        if clone_root:
+            shutil.rmtree(clone_root, ignore_errors=True)
 
 
-def normalize_latest_sales_payload(payload, sale_date=None):
+def merge_latest_sales_payloads(payloads):
+    combined = []
+    total_results = 0
+    result_count = 0
+    fetch_source = None
+    for payload, source in payloads:
+        fetch_source = fetch_source or source
+        if isinstance(payload, dict):
+            page_rows = payload.get("data")
+            if isinstance(page_rows, list):
+                combined.extend(page_rows)
+            total_results = max(int(payload.get("totalResults") or 0), total_results)
+            result_count += int(payload.get("resultCount") or (len(page_rows) if isinstance(page_rows, list) else 0))
+    return {
+        "previousPage": "",
+        "nextPage": "",
+        "resultCount": result_count,
+        "totalResults": total_results or result_count,
+        "data": combined,
+    }, fetch_source or "unknown"
+
+
+def fetch_all_latest_sales_json(
+    product_id,
+    product_url=None,
+    mpfev=DEFAULT_MPFEV,
+    use_browser_fallback=True,
+    headless=True,
+    user_data_dir=None,
+    profile_directory=None,
+    session_file=None,
+    browser_script_timeout=None,
+    request_timeout=None,
+    request_retries=0,
+    request_retry_backoff=1.5,
+    max_pages=50,
+):
+    payloads = []
+    authenticated_offset_mode = bool(session_file)
+    total_results = None
+    offset = 0 if authenticated_offset_mode else None
+    seen_pages = set()
+    seen_urls = set()
+    page = None
+    endpoint_override = None
+
+    for _ in range(max_pages):
+        payload, fetch_source = fetch_latest_sales_json(
+            product_id,
+            product_url=product_url,
+            mpfev=mpfev,
+            use_browser_fallback=use_browser_fallback,
+            headless=headless,
+            user_data_dir=user_data_dir,
+            profile_directory=profile_directory,
+            session_file=session_file,
+            browser_script_timeout=browser_script_timeout,
+            request_timeout=request_timeout,
+            request_retries=request_retries,
+            request_retry_backoff=request_retry_backoff,
+            page=page,
+            offset=offset,
+            limit=DEFAULT_AUTHENTICATED_SALES_PAGE_SIZE if authenticated_offset_mode else None,
+            endpoint_override=endpoint_override,
+        )
+        payloads.append((payload, fetch_source))
+        if authenticated_offset_mode:
+            rows = payload.get("data") if isinstance(payload, dict) else None
+            rows = rows if isinstance(rows, list) else []
+            if total_results is None:
+                try:
+                    total_results = int(payload.get("totalResults") or 0)
+                except Exception:
+                    total_results = 0
+            if not rows:
+                break
+            offset += len(rows)
+            next_page = _next_page_value(payload)
+            if not next_page:
+                break
+            if total_results and offset >= total_results:
+                break
+            continue
+        next_page = _next_page_value(payload)
+        if not next_page:
+            break
+        if isinstance(next_page, str) and next_page.startswith("http"):
+            if next_page in seen_urls:
+                break
+            seen_urls.add(next_page)
+            endpoint_override = next_page
+            page = None
+            continue
+        if str(next_page) in seen_pages:
+            break
+        seen_pages.add(str(next_page))
+        endpoint_override = None
+        page = next_page
+
+    return merge_latest_sales_payloads(payloads)
+
+
+def iter_latest_sales_pages(
+    product_id,
+    product_url=None,
+    mpfev=DEFAULT_MPFEV,
+    use_browser_fallback=True,
+    headless=True,
+    user_data_dir=None,
+    profile_directory=None,
+    session_file=None,
+    browser_script_timeout=None,
+    request_timeout=None,
+    request_retries=0,
+    request_retry_backoff=1.5,
+    max_pages=50,
+):
+    authenticated_offset_mode = bool(session_file)
+    total_results = None
+    offset = 0 if authenticated_offset_mode else None
+    seen_pages = set()
+    seen_urls = set()
+    page = None
+    endpoint_override = None
+
+    for _ in range(max_pages):
+        payload, fetch_source = fetch_latest_sales_json(
+            product_id,
+            product_url=product_url,
+            mpfev=mpfev,
+            use_browser_fallback=use_browser_fallback,
+            headless=headless,
+            user_data_dir=user_data_dir,
+            profile_directory=profile_directory,
+            session_file=session_file,
+            browser_script_timeout=browser_script_timeout,
+            request_timeout=request_timeout,
+            request_retries=request_retries,
+            request_retry_backoff=request_retry_backoff,
+            page=page,
+            offset=offset,
+            limit=DEFAULT_AUTHENTICATED_SALES_PAGE_SIZE if authenticated_offset_mode else None,
+            endpoint_override=endpoint_override,
+        )
+        yield payload, fetch_source
+        if authenticated_offset_mode:
+            rows = payload.get("data") if isinstance(payload, dict) else None
+            rows = rows if isinstance(rows, list) else []
+            if total_results is None:
+                try:
+                    total_results = int(payload.get("totalResults") or 0)
+                except Exception:
+                    total_results = 0
+            if not rows:
+                break
+            offset += len(rows)
+            next_page = _next_page_value(payload)
+            if not next_page:
+                break
+            if total_results and offset >= total_results:
+                break
+            continue
+        next_page = _next_page_value(payload)
+        if not next_page:
+            break
+        if isinstance(next_page, str) and next_page.startswith("http"):
+            if next_page in seen_urls:
+                break
+            seen_urls.add(next_page)
+            endpoint_override = next_page
+            page = None
+            continue
+        if str(next_page) in seen_pages:
+            break
+        seen_pages.add(str(next_page))
+        endpoint_override = None
+        page = next_page
+
+
+def normalize_latest_sales_payload(payload, sale_date=None, seen_fingerprints=None):
     data = payload
     if isinstance(payload, dict):
         for key in ("data", "results", "sales", "items"):
@@ -225,7 +663,7 @@ def normalize_latest_sales_payload(payload, sale_date=None):
             data = []
 
     target_date = sale_date or None
-    seen = set()
+    seen = seen_fingerprints if seen_fingerprints is not None else set()
     rows = []
     for item in data:
         row = {
@@ -398,6 +836,72 @@ def insert_sales_rows(conn, product_id, rows, source="TCGplayer", target_kind="s
     return inserted
 
 
+def ingest_latest_sales_pages(
+    conn,
+    internal_product_id,
+    tcgplayer_product_id,
+    resolved_url,
+    sale_date=None,
+    source="TCGplayer",
+    use_browser_fallback=True,
+    headless=True,
+    target_kind="sealed",
+    user_data_dir=None,
+    profile_directory=None,
+    session_file=None,
+    browser_script_timeout=None,
+    request_timeout=None,
+    request_retries=0,
+    request_retry_backoff=1.5,
+    max_pages=50,
+    commit_every_pages=1,
+):
+    effective_sale_date = sale_date
+    initial_backfill = should_initial_backfill(conn, internal_product_id, sale_date=sale_date, target_kind=target_kind)
+    if initial_backfill:
+        effective_sale_date = None
+
+    seen_fingerprints = set()
+    fetched_rows = 0
+    inserted_rows = 0
+    fetch_source = None
+    pages_processed = 0
+
+    for payload, page_fetch_source in iter_latest_sales_pages(
+        tcgplayer_product_id,
+        product_url=resolved_url,
+        use_browser_fallback=use_browser_fallback,
+        headless=headless,
+        user_data_dir=user_data_dir,
+        profile_directory=profile_directory,
+        session_file=session_file,
+        browser_script_timeout=browser_script_timeout,
+        request_timeout=request_timeout,
+        request_retries=request_retries,
+        request_retry_backoff=request_retry_backoff,
+        max_pages=max_pages,
+    ):
+        fetch_source = fetch_source or page_fetch_source
+        rows = normalize_latest_sales_payload(payload, sale_date=effective_sale_date, seen_fingerprints=seen_fingerprints)
+        fetched_rows += len(rows)
+        inserted_rows += insert_sales_rows(conn, internal_product_id, rows, source=source, target_kind=target_kind)
+        pages_processed += 1
+        if commit_every_pages > 0 and pages_processed % commit_every_pages == 0:
+            conn.commit()
+
+    mark_sales_refresh_state(conn, internal_product_id, target_kind=target_kind, backfill_completed=initial_backfill)
+    return {
+        "product_id": internal_product_id,
+        "tcgplayer_product_id": tcgplayer_product_id,
+        "fetch_source": fetch_source or "unknown",
+        "fetched_rows": fetched_rows,
+        "inserted_rows": inserted_rows,
+        "sale_date": effective_sale_date,
+        "initial_backfill": initial_backfill,
+        "pages_processed": pages_processed,
+    }
+
+
 def target_has_existing_sales(conn, product_id, target_kind="sealed"):
     config = get_target_config(target_kind)
     fk_column = config["fk_column"]
@@ -486,35 +990,47 @@ def mark_sales_refresh_state(conn, product_id, target_kind="sealed", backfill_co
     )
 
 
-def ingest_latest_sales(conn, product_id=None, product_url=None, sale_date=None, source="TCGplayer", use_browser_fallback=True, headless=True, target_kind="sealed"):
+def ingest_latest_sales(
+    conn,
+    product_id=None,
+    product_url=None,
+    sale_date=None,
+    source="TCGplayer",
+    use_browser_fallback=True,
+    headless=True,
+    target_kind="sealed",
+    user_data_dir=None,
+    profile_directory=None,
+    session_file=None,
+    browser_script_timeout=None,
+    request_timeout=None,
+    request_retries=0,
+    request_retry_backoff=1.5,
+):
     internal_product_id, tcgplayer_product_id, resolved_url = resolve_product_record(
         conn,
         tcgplayer_product_id=product_id,
         product_url=product_url,
         target_kind=target_kind,
     )
-    payload, fetch_source = fetch_latest_sales_json(
-        tcgplayer_product_id,
-        product_url=resolved_url,
+    return ingest_latest_sales_pages(
+        conn,
+        internal_product_id=internal_product_id,
+        tcgplayer_product_id=tcgplayer_product_id,
+        resolved_url=resolved_url,
+        sale_date=sale_date,
+        source=source,
         use_browser_fallback=use_browser_fallback,
         headless=headless,
+        target_kind=target_kind,
+        user_data_dir=user_data_dir,
+        profile_directory=profile_directory,
+        session_file=session_file,
+        browser_script_timeout=browser_script_timeout,
+        request_timeout=request_timeout,
+        request_retries=request_retries,
+        request_retry_backoff=request_retry_backoff,
     )
-    effective_sale_date = sale_date
-    initial_backfill = should_initial_backfill(conn, internal_product_id, sale_date=sale_date, target_kind=target_kind)
-    if initial_backfill:
-        effective_sale_date = None
-    rows = normalize_latest_sales_payload(payload, sale_date=effective_sale_date)
-    inserted = insert_sales_rows(conn, internal_product_id, rows, source=source, target_kind=target_kind)
-    mark_sales_refresh_state(conn, internal_product_id, target_kind=target_kind, backfill_completed=initial_backfill)
-    return {
-        "product_id": internal_product_id,
-        "tcgplayer_product_id": tcgplayer_product_id,
-        "fetch_source": fetch_source,
-        "fetched_rows": len(rows),
-        "inserted_rows": inserted,
-        "sale_date": effective_sale_date,
-        "initial_backfill": initial_backfill,
-    }
 
 
 def ingest_sales_targets(
@@ -526,6 +1042,13 @@ def ingest_sales_targets(
     headless=True,
     commit_every=10,
     target_kind="sealed",
+    user_data_dir=None,
+    profile_directory=None,
+    session_file=None,
+    browser_script_timeout=None,
+    request_timeout=None,
+    request_retries=0,
+    request_retry_backoff=1.5,
 ):
     processed = 0
     failed = 0
@@ -534,31 +1057,36 @@ def ingest_sales_targets(
 
     for index, (internal_product_id, tcgplayer_product_id, resolved_url) in enumerate(targets, start=1):
         try:
-            payload, fetch_source = fetch_latest_sales_json(
-                tcgplayer_product_id,
-                product_url=resolved_url,
+            product_result = ingest_latest_sales_pages(
+                conn,
+                internal_product_id=internal_product_id,
+                tcgplayer_product_id=tcgplayer_product_id,
+                resolved_url=resolved_url,
+                sale_date=sale_date,
+                source=source,
                 use_browser_fallback=use_browser_fallback,
                 headless=headless,
+                target_kind=target_kind,
+                user_data_dir=user_data_dir,
+                profile_directory=profile_directory,
+                session_file=session_file,
+                browser_script_timeout=browser_script_timeout,
+                request_timeout=request_timeout,
+                request_retries=request_retries,
+                request_retry_backoff=request_retry_backoff,
             )
-            effective_sale_date = sale_date
-            initial_backfill = should_initial_backfill(conn, internal_product_id, sale_date=sale_date, target_kind=target_kind)
-            if initial_backfill:
-                effective_sale_date = None
-            rows = normalize_latest_sales_payload(payload, sale_date=effective_sale_date)
-            inserted = insert_sales_rows(conn, internal_product_id, rows, source=source, target_kind=target_kind)
-            mark_sales_refresh_state(conn, internal_product_id, target_kind=target_kind, backfill_completed=initial_backfill)
             processed += 1
-            fetched_rows += len(rows)
-            inserted_rows += inserted
+            fetched_rows += product_result["fetched_rows"]
+            inserted_rows += product_result["inserted_rows"]
             print(
-                f"[{index}/{len(targets)}] sales product={tcgplayer_product_id} fetched={len(rows)} inserted={inserted}"
-                + (" mode=initial_backfill" if initial_backfill else ""),
+                f"[{index}/{len(targets)}] sales tcgplayer={tcgplayer_product_id} internal={internal_product_id} source={product_result['fetch_source']} pages={product_result['pages_processed']} fetched={product_result['fetched_rows']} inserted={product_result['inserted_rows']}"
+                + (" mode=initial_backfill" if product_result["initial_backfill"] else ""),
                 flush=True,
             )
         except Exception as exc:
             failed += 1
             print(
-                f"[{index}/{len(targets)}] sales product={tcgplayer_product_id} failed={type(exc).__name__}: {exc}",
+                f"[{index}/{len(targets)}] sales tcgplayer={tcgplayer_product_id} internal={internal_product_id} failed={type(exc).__name__}: {exc}",
                 flush=True,
             )
         if commit_every > 0 and index % commit_every == 0:
@@ -589,9 +1117,16 @@ def main():
     parser.add_argument("--target-kind", choices=["sealed", "cards"], default="sealed", help="Choose which product universe and sales table to target")
     parser.add_argument("--no-browser-fallback", action="store_true", help="Disable Selenium fallback when requests are rejected")
     parser.add_argument("--headless", action="store_true", help="Run Chrome headless for browser fallback")
+    parser.add_argument("--chrome-user-data-dir", default="", help="Reuse an existing Chrome user data dir for authenticated browser fallback")
+    parser.add_argument("--chrome-profile-directory", default="", help="Optional Chrome profile directory name inside the user data dir")
+    parser.add_argument("--session-file", default="", help="JSON file exported from a signed-in Chrome session")
     parser.add_argument("--snapshot-file", help="Optional JSON fixture file instead of hitting the network")
     parser.add_argument("--limit", type=int, default=0, help="Limit number of products when running whole-universe sales refresh")
-    parser.add_argument("--commit-every", type=int, default=10, help="Commit DB writes every N products")
+    parser.add_argument("--commit-every", type=int, default=1, help="Commit DB writes every N products")
+    parser.add_argument("--browser-script-timeout", type=int, default=0, help="Override Selenium async script timeout in seconds (0 uses automatic defaults)")
+    parser.add_argument("--request-timeout", type=float, default=0, help="Override requests timeout in seconds for latestsales fetches (0 uses automatic defaults)")
+    parser.add_argument("--request-retries", type=int, default=2, help="Retry latestsales HTTP requests this many times before Selenium fallback")
+    parser.add_argument("--request-retry-backoff", type=float, default=1.5, help="Backoff multiplier between latestsales HTTP request retries")
     parser.add_argument("--set-id", type=int, default=0)
     parser.add_argument("--set-name", default="")
     parser.add_argument("--shard-index", type=int, default=0, help="Zero-based shard index for parallel batch workers")
@@ -601,6 +1136,18 @@ def main():
     conn = connect_database(resolve_database_target(args.db))
     configure_db_connection(conn)
     ensure_runtime_schema(conn)
+
+    browser_script_timeout = args.browser_script_timeout or None
+    if browser_script_timeout is None and args.session_file.strip() and args.all_dates:
+        # Full authenticated backfills routinely require more time than
+        # the normal recent-sales path, so make the heavy case more patient
+        # by default without slowing everyday incremental runs.
+        browser_script_timeout = 240
+    request_timeout = args.request_timeout or None
+    request_retries = args.request_retries
+    request_retry_backoff = args.request_retry_backoff
+    if request_timeout is None and args.session_file.strip() and args.all_dates:
+        request_timeout = 45
 
     if args.snapshot_file:
         payload = json.loads(Path(args.snapshot_file).read_text(encoding="utf-8"))
@@ -648,6 +1195,13 @@ def main():
             use_browser_fallback=not args.no_browser_fallback,
             headless=args.headless,
             target_kind=args.target_kind,
+            user_data_dir=args.chrome_user_data_dir.strip() or None,
+            profile_directory=args.chrome_profile_directory.strip() or None,
+            session_file=args.session_file.strip() or None,
+            browser_script_timeout=browser_script_timeout,
+            request_timeout=request_timeout,
+            request_retries=request_retries,
+            request_retry_backoff=request_retry_backoff,
         )
     else:
         print(
@@ -663,6 +1217,13 @@ def main():
             headless=args.headless,
             commit_every=args.commit_every,
             target_kind=args.target_kind,
+            user_data_dir=args.chrome_user_data_dir.strip() or None,
+            profile_directory=args.chrome_profile_directory.strip() or None,
+            session_file=args.session_file.strip() or None,
+            browser_script_timeout=browser_script_timeout,
+            request_timeout=request_timeout,
+            request_retries=request_retries,
+            request_retry_backoff=request_retry_backoff,
         )
     conn.commit()
     conn.close()

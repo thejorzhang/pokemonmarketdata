@@ -27,7 +27,7 @@ class TestOperatorConsole(unittest.TestCase):
         command = build_command(
             "card_catalog_scrape",
             {
-                "out": "pokemon_cards.csv",
+                "db": "sealed_market.db",
                 "mode": "fresh",
                 "category_slug": "pokemon",
                 "product_line_name": "pokemon",
@@ -38,24 +38,26 @@ class TestOperatorConsole(unittest.TestCase):
             },
         )
         self.assertEqual(command[:3], ["python3", "batch_workers.py", "catalog"])
+        self.assertIn("--target-kind", command)
+        self.assertIn("cards", command)
         self.assertIn("--product-type-name", command)
         self.assertIn("Cards", command)
         self.assertIn("--all", command)
 
-    def test_build_card_catalog_load_command(self):
+    def test_build_card_catalog_scrape_command_single_worker(self):
         command = build_command(
-            "card_catalog",
+            "card_catalog_scrape",
             {
                 "db": "sealed_market.db",
-                "csv": "pokemon_cards.csv",
+                "mode": "fresh",
                 "category_slug": "pokemon",
                 "product_line_name": "pokemon",
-                "source": "TCGplayer Cards",
+                "product_type_name": "Cards",
+                "workers": 1,
             },
         )
         self.assertEqual(command[:2], ["python3", "card_catalog_refresh.py"])
-        self.assertIn("--csv", command)
-        self.assertIn("pokemon_cards.csv", command)
+        self.assertIn("--scrape", command)
 
     def test_build_card_details_command_batched(self):
         command = build_command(
@@ -83,6 +85,7 @@ class TestOperatorConsole(unittest.TestCase):
                 "all_dates": False,
                 "workers": 4,
                 "limit": 0,
+                "session_file": "/tmp/tcgplayer_session.json",
                 "browser_fallback": True,
                 "headless": True,
             },
@@ -90,13 +93,49 @@ class TestOperatorConsole(unittest.TestCase):
         self.assertEqual(command[:3], ["python3", "batch_workers.py", "sales"])
         self.assertIn("--target-kind", command)
         self.assertIn("cards", command)
+        self.assertIn("--session-file", command)
+
+    def test_build_sales_command_batched_with_session_file(self):
+        command = build_command(
+            "sales",
+            {
+                "db": "sealed_market.db",
+                "source": "TCGplayer",
+                "sale_date": "2026-04-01",
+                "all_dates": False,
+                "workers": 4,
+                "limit": 0,
+                "session_file": "/tmp/tcgplayer_session.json",
+                "browser_fallback": True,
+                "headless": True,
+            },
+        )
+        self.assertEqual(command[:3], ["python3", "batch_workers.py", "sales"])
+        self.assertIn("--session-file", command)
+
+    def test_build_sales_command_batched_with_session_file_and_no_browser_fallback(self):
+        command = build_command(
+            "sales",
+            {
+                "db": "sealed_market.db",
+                "source": "TCGplayer",
+                "all_dates": True,
+                "workers": 4,
+                "limit": 0,
+                "session_file": "/tmp/tcgplayer_session.json",
+                "browser_fallback": False,
+                "headless": True,
+            },
+        )
+        self.assertEqual(command[:3], ["python3", "batch_workers.py", "sales"])
+        self.assertIn("--session-file", command)
+        self.assertIn("--no-browser-fallback", command)
 
     def test_build_card_pipeline_command(self):
         command = build_command(
             "card_pipeline",
             {
                 "db": "sealed_market.db",
-                "out": "pokemon_cards.csv",
                 "category_slug": "pokemon",
                 "product_line_name": "pokemon",
                 "product_type_name": "Cards",

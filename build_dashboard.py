@@ -9,13 +9,15 @@ import html
 import os
 from datetime import datetime
 
-from db import connect_database, resolve_database_target, table_exists
+from db import configure_connection, connect_database, resolve_database_target, table_exists
 from analyze_outliers import (
     build_product_histories,
     compute_metrics,
     fetch_rows,
     generate_insights,
 )
+from build_set_stats import build_set_stats
+from populate_db import ensure_runtime_schema
 
 
 def fmt_money(value):
@@ -77,6 +79,35 @@ def fetch_failure_breakdown(conn, run_id):
     return c.fetchall()
 
 
+def fetch_set_stats(conn, limit=20):
+    if not table_exists(conn, "set_stats"):
+        return []
+    c = conn.cursor()
+    c.execute(
+        """
+        SELECT
+            set_name,
+            COALESCE(product_line, '-') AS product_line,
+            COALESCE(set_type, '-') AS set_type,
+            COALESCE(total_product_count, 0) AS total_product_count,
+            COALESCE(total_sale_count, 0) AS total_sale_count,
+            COALESCE(detail_coverage_pct, 0.0) AS detail_coverage_pct,
+            COALESCE(sales_coverage_pct, 0.0) AS sales_coverage_pct,
+            COALESCE(priority_hot_count, 0) AS hot_count,
+            COALESCE(priority_warm_count, 0) AS warm_count,
+            COALESCE(priority_cold_count, 0) AS cold_count,
+            COALESCE(priority_dormant_count, 0) AS dormant_count,
+            COALESCE(total_last_sale_at, '-') AS total_last_sale_at,
+            COALESCE(refreshed_at, '-') AS refreshed_at
+        FROM set_stats s
+        ORDER BY total_sale_count DESC, total_product_count DESC, set_name
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    return c.fetchall()
+
+
 def build_table(headers, rows):
     if not rows:
         return "<p class='empty'>No rows.</p>"
@@ -90,12 +121,25 @@ def build_table(headers, rows):
     return f"<table><thead><tr>{head_html}</tr></thead><tbody>{body_html}</tbody></table>"
 
 
-def render_dashboard(source, metrics, insights, latest_run, failure_breakdown):
+def render_dashboard(source, metrics, insights, latest_run, failure_breakdown, set_stats_rows):
     generated = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     with_history = sum(1 for m in metrics if m["history_points"] >= 2)
     empty_notice = ""
     if not metrics:
         empty_notice = "<p class='empty'>No rows found for this source yet. Run a scrape to populate the dashboard.</p>"
+
+    sets_with_sales = sum(1 for row in set_stats_rows if row[4] > 0)
+    sets_with_details = sum(1 for row in set_stats_rows if row[5] > 0 or row[6] > 0)
+    avg_detail_coverage = (
+        sum(float(row[5]) for row in set_stats_rows if row[5] is not None) / len(set_stats_rows)
+        if set_stats_rows
+        else None
+    )
+    avg_sales_coverage = (
+        sum(float(row[6]) for row in set_stats_rows if row[6] is not None) / len(set_stats_rows)
+        if set_stats_rows
+        else None
+    )
 
     movers_up_rows = []
     for row in insights["top_movers_up"][:20]:
@@ -171,6 +215,30 @@ def render_dashboard(source, metrics, insights, latest_run, failure_breakdown):
                 ["Stage", "Reason", "Count"],
                 [(html.escape(stage), html.escape(reason), str(cnt)) for stage, reason, cnt in failure_breakdown],
             )
+
+    set_stats_html = "<p class='empty'>Build set stats to see set-level coverage and freshness.</p>"
+    if set_stats_rows:
+        set_stats_html = build_table(
+            ["Set", "Line", "Type", "Products", "Sales", "Detail Cov", "Sales Cov", "Hot", "Warm", "Cold", "Dormant", "Latest Sale", "Refreshed"],
+            [
+                (
+                    html.escape(row[0]),
+                    html.escape(row[1]),
+                    html.escape(row[2]),
+                    str(row[3]),
+                    str(row[4]),
+                    fmt_pct(row[5]),
+                    fmt_pct(row[6]),
+                    str(row[7]),
+                    str(row[8]),
+                    str(row[9]),
+                    str(row[10]),
+                    html.escape(row[11]),
+                    html.escape(row[12]),
+                )
+                for row in set_stats_rows
+            ],
+        )
 
     return f"""<!doctype html>
 <html lang="en">
@@ -298,8 +366,12 @@ def render_dashboard(source, metrics, insights, latest_run, failure_breakdown):
     <div class="grid">
       <div class="card"><div class="k">Products Analyzed</div><div class="v">{len(metrics)}</div></div>
       <div class="card"><div class="k">Products With History</div><div class="v">{with_history}</div></div>
+      <div class="card"><div class="k">Sets With Sales</div><div class="v">{sets_with_sales}</div></div>
+      <div class="card"><div class="k">Sets With Details</div><div class="v">{sets_with_details}</div></div>
       <div class="card"><div class="k">Spread Outliers</div><div class="v">{len(insights["outliers_spread"])}</div></div>
       <div class="card"><div class="k">Scrape Issue Flags</div><div class="v">{len(insights["possible_scrape_issues"])}</div></div>
+      <div class="card"><div class="k">Avg Detail Coverage</div><div class="v">{fmt_pct(avg_detail_coverage)}</div></div>
+      <div class="card"><div class="k">Avg Sales Coverage</div><div class="v">{fmt_pct(avg_sales_coverage)}</div></div>
     </div>
     {empty_notice}
 
@@ -308,6 +380,9 @@ def render_dashboard(source, metrics, insights, latest_run, failure_breakdown):
 
     <h2>Latest Run Failure Breakdown</h2>
     {failure_html}
+
+    <h2>Set Overview</h2>
+    {set_stats_html}
 
     <div class="split">
       <div>
@@ -341,13 +416,16 @@ def main():
     args = parser.parse_args()
 
     conn = connect_database(resolve_database_target(args.db))
+    configure_connection(conn)
+    ensure_runtime_schema(conn)
+    build_set_stats(conn)
     if not table_exists(conn, "products") or not table_exists(conn, "listings"):
         latest_run = None
         failures = []
         products = {}
         metrics = []
         insights = generate_insights(metrics, top_n=args.top, z_threshold=args.z_threshold)
-        html_content = render_dashboard(args.source, metrics, insights, latest_run, failures)
+        html_content = render_dashboard(args.source, metrics, insights, latest_run, failures, [])
         output_dir = os.path.dirname(args.out) or "."
         os.makedirs(output_dir, exist_ok=True)
         with open(args.out, "w", encoding="utf-8") as f:
@@ -362,11 +440,12 @@ def main():
     insights = generate_insights(metrics, top_n=args.top, z_threshold=args.z_threshold)
     latest_run = fetch_latest_run(conn, args.source)
     failures = fetch_failure_breakdown(conn, latest_run["id"]) if latest_run else []
+    set_stats_rows = fetch_set_stats(conn, limit=50)
     conn.close()
 
     output_dir = os.path.dirname(args.out) or "."
     os.makedirs(output_dir, exist_ok=True)
-    html_content = render_dashboard(args.source, metrics, insights, latest_run, failures)
+    html_content = render_dashboard(args.source, metrics, insights, latest_run, failures, set_stats_rows)
     with open(args.out, "w", encoding="utf-8") as f:
         f.write(html_content)
     print(f"Wrote dashboard: {args.out}")

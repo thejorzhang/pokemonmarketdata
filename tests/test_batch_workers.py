@@ -71,6 +71,7 @@ class TestBatchWorkers(unittest.TestCase):
             sale_date="2026-03-31",
             all_dates=False,
             snapshot_file="",
+            session_file="/tmp/tcgplayer_session.json",
             limit=0,
             commit_every=10,
             no_browser_fallback=False,
@@ -83,6 +84,7 @@ class TestBatchWorkers(unittest.TestCase):
         self.assertIn("--shard-count", command)
         self.assertIn("--target-kind", command)
         self.assertIn("--set-id", command)
+        self.assertIn("--session-file", command)
 
     def test_build_card_details_worker_command(self):
         args = Namespace(
@@ -106,6 +108,10 @@ class TestBatchWorkers(unittest.TestCase):
 
     def test_build_catalog_worker_command(self):
         args = Namespace(
+            db="sealed_market.db",
+            target_kind="cards",
+            mode="fresh",
+            scrape_date="2026-04-05",
             pages=3,
             all=False,
             wait_time=20,
@@ -116,8 +122,10 @@ class TestBatchWorkers(unittest.TestCase):
             product_type_name="Cards",
             headless=True,
         )
-        command = build_catalog_worker_command(args, shard_index=0, shard_count=4, output_path="out.csv")
-        self.assertIn("link_scraper.py", command)
+        command = build_catalog_worker_command(args, shard_index=0, shard_count=4, refresh_token="token-123")
+        self.assertIn("card_catalog_refresh.py", command)
+        self.assertIn("--scrape", command)
+        self.assertIn("--refresh-token", command)
         self.assertIn("--category-slug", command)
         self.assertIn("Cards", command)
 

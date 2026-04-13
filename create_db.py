@@ -31,6 +31,10 @@ def create_schema(conn):
             url TEXT,
             release_date TEXT,
             sku_code TEXT,
+            first_seen_at TEXT,
+            last_seen_at TEXT,
+            catalog_active INTEGER NOT NULL DEFAULT 1,
+            catalog_scrape_date TEXT,
             last_sales_refresh_at TEXT,
             sales_backfill_completed_at TEXT
         )
@@ -194,6 +198,64 @@ def create_schema(conn):
     )
     c.execute(
         f"""
+        CREATE TABLE IF NOT EXISTS price_history (
+            {pk},
+            product_id INTEGER NOT NULL,
+            endpoint_kind TEXT NOT NULL,
+            history_range TEXT NOT NULL,
+            bucket_index INTEGER,
+            bucket_start_date TEXT NOT NULL,
+            bucket_end_date TEXT,
+            bucket_label TEXT,
+            market_price REAL,
+            quantity_sold INTEGER,
+            transaction_count INTEGER,
+            low_sale_price REAL,
+            low_sale_price_with_shipping REAL,
+            high_sale_price REAL,
+            high_sale_price_with_shipping REAL,
+            avg_sale_price REAL,
+            avg_sale_price_with_shipping REAL,
+            total_sale_value REAL,
+            source TEXT NOT NULL,
+            history_fingerprint TEXT NOT NULL,
+            bucket_json TEXT,
+            scraped_at TEXT NOT NULL,
+            FOREIGN KEY (product_id) REFERENCES products (id)
+        )
+        """
+    )
+    c.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS card_price_history (
+            {pk},
+            card_product_id INTEGER NOT NULL,
+            endpoint_kind TEXT NOT NULL,
+            history_range TEXT NOT NULL,
+            bucket_index INTEGER,
+            bucket_start_date TEXT NOT NULL,
+            bucket_end_date TEXT,
+            bucket_label TEXT,
+            market_price REAL,
+            quantity_sold INTEGER,
+            transaction_count INTEGER,
+            low_sale_price REAL,
+            low_sale_price_with_shipping REAL,
+            high_sale_price REAL,
+            high_sale_price_with_shipping REAL,
+            avg_sale_price REAL,
+            avg_sale_price_with_shipping REAL,
+            total_sale_value REAL,
+            source TEXT NOT NULL,
+            history_fingerprint TEXT NOT NULL,
+            bucket_json TEXT,
+            scraped_at TEXT NOT NULL,
+            FOREIGN KEY (card_product_id) REFERENCES card_products (id)
+        )
+        """
+    )
+    c.execute(
+        f"""
         CREATE TABLE IF NOT EXISTS card_products (
             {pk},
             set_id INTEGER,
@@ -205,6 +267,10 @@ def create_schema(conn):
             set_name TEXT,
             source TEXT NOT NULL,
             discovered_at TEXT NOT NULL,
+            first_seen_at TEXT,
+            last_seen_at TEXT,
+            catalog_active INTEGER NOT NULL DEFAULT 1,
+            catalog_scrape_date TEXT,
             last_sales_refresh_at TEXT,
             sales_backfill_completed_at TEXT,
             FOREIGN KEY (set_id) REFERENCES sets (id)
@@ -252,6 +318,72 @@ def create_schema(conn):
         )
         """
     )
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS set_stats (
+            set_id INTEGER PRIMARY KEY,
+            set_name TEXT NOT NULL,
+            category_slug TEXT,
+            product_line TEXT,
+            set_type TEXT,
+            release_date TEXT,
+            first_seen_at TEXT,
+            last_seen_at TEXT,
+            sealed_product_count INTEGER NOT NULL DEFAULT 0,
+            sealed_detail_count INTEGER NOT NULL DEFAULT 0,
+            sealed_listing_count INTEGER NOT NULL DEFAULT 0,
+            sealed_sale_count INTEGER NOT NULL DEFAULT 0,
+            sealed_products_with_sales INTEGER NOT NULL DEFAULT 0,
+            sealed_last_listing_at TEXT,
+            sealed_last_sale_at TEXT,
+            card_product_count INTEGER NOT NULL DEFAULT 0,
+            card_detail_count INTEGER NOT NULL DEFAULT 0,
+            card_sale_count INTEGER NOT NULL DEFAULT 0,
+            card_products_with_sales INTEGER NOT NULL DEFAULT 0,
+            card_last_sale_at TEXT,
+            priority_target_count INTEGER NOT NULL DEFAULT 0,
+            priority_hot_count INTEGER NOT NULL DEFAULT 0,
+            priority_warm_count INTEGER NOT NULL DEFAULT 0,
+            priority_cold_count INTEGER NOT NULL DEFAULT 0,
+            priority_dormant_count INTEGER NOT NULL DEFAULT 0,
+            priority_avg_score REAL,
+            priority_max_score REAL,
+            total_product_count INTEGER NOT NULL DEFAULT 0,
+            total_detail_count INTEGER NOT NULL DEFAULT 0,
+            total_sale_count INTEGER NOT NULL DEFAULT 0,
+            total_products_with_sales INTEGER NOT NULL DEFAULT 0,
+            total_last_sale_at TEXT,
+            detail_coverage_pct REAL,
+            sales_coverage_pct REAL,
+            refreshed_at TEXT NOT NULL,
+            summary_json TEXT
+        )
+        """
+    )
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS set_details (
+            set_id INTEGER PRIMARY KEY,
+            set_name TEXT NOT NULL,
+            category_slug TEXT,
+            product_line TEXT,
+            set_type TEXT,
+            release_date TEXT,
+            first_seen_at TEXT,
+            last_seen_at TEXT,
+            sealed_product_count INTEGER NOT NULL DEFAULT 0,
+            card_product_count INTEGER NOT NULL DEFAULT 0,
+            total_product_count INTEGER NOT NULL DEFAULT 0,
+            total_sale_count INTEGER NOT NULL DEFAULT 0,
+            detail_coverage_pct REAL,
+            sales_coverage_pct REAL,
+            sealed_last_listing_at TEXT,
+            total_last_sale_at TEXT,
+            refreshed_at TEXT NOT NULL,
+            summary_json TEXT
+        )
+        """
+    )
 
     # Backfill columns when the schema is opened against an older SQLite DB.
     cols = table_columns(conn, "listings")
@@ -290,10 +422,22 @@ def create_schema(conn):
         c.execute("ALTER TABLE products ADD COLUMN last_sales_refresh_at TEXT")
     if "sales_backfill_completed_at" not in product_cols:
         c.execute("ALTER TABLE products ADD COLUMN sales_backfill_completed_at TEXT")
+    if "first_seen_at" not in product_cols:
+        c.execute("ALTER TABLE products ADD COLUMN first_seen_at TEXT")
+    if "last_seen_at" not in product_cols:
+        c.execute("ALTER TABLE products ADD COLUMN last_seen_at TEXT")
+    if "catalog_active" not in product_cols:
+        c.execute("ALTER TABLE products ADD COLUMN catalog_active INTEGER NOT NULL DEFAULT 1")
     if "last_sales_refresh_at" not in card_product_cols:
         c.execute("ALTER TABLE card_products ADD COLUMN last_sales_refresh_at TEXT")
     if "sales_backfill_completed_at" not in card_product_cols:
         c.execute("ALTER TABLE card_products ADD COLUMN sales_backfill_completed_at TEXT")
+    if "first_seen_at" not in card_product_cols:
+        c.execute("ALTER TABLE card_products ADD COLUMN first_seen_at TEXT")
+    if "last_seen_at" not in card_product_cols:
+        c.execute("ALTER TABLE card_products ADD COLUMN last_seen_at TEXT")
+    if "catalog_active" not in card_product_cols:
+        c.execute("ALTER TABLE card_products ADD COLUMN catalog_active INTEGER NOT NULL DEFAULT 1")
 
     c.execute(
         """
@@ -339,8 +483,16 @@ def create_schema(conn):
     c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_product_fingerprint_unique ON sales (product_id, sale_fingerprint)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_card_sales_product_sale_date ON card_sales (card_product_id, sale_date)")
     c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_card_sales_product_fingerprint_unique ON card_sales (card_product_id, sale_fingerprint)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_price_history_product_range_date ON price_history (product_id, endpoint_kind, history_range, bucket_start_date)")
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_price_history_product_fingerprint_unique ON price_history (product_id, history_fingerprint)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_card_price_history_product_range_date ON card_price_history (card_product_id, endpoint_kind, history_range, bucket_start_date)")
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_card_price_history_product_fingerprint_unique ON card_price_history (card_product_id, history_fingerprint)")
     c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sets_name_product_line_unique ON sets (name, product_line)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_sets_product_line_name ON sets (product_line, name)")
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_set_stats_set_id_unique ON set_stats (set_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_set_stats_sales ON set_stats (sealed_sale_count, card_sale_count)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_set_stats_priority ON set_stats (priority_hot_count, priority_warm_count)")
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_set_details_set_id_unique ON set_details (set_id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_product_details_tcgplayer_product_id ON product_details (tcgplayer_product_id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_product_details_set_id ON product_details (set_id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_card_products_tcgplayer_product_id ON card_products (tcgplayer_product_id)")

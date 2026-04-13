@@ -263,18 +263,21 @@ def main():
     failed = 0
     for card_product_id, name, url, set_name in rows:
         try:
-            html, meta = fetch_page_with_retries(
+            html, status_code, attempts_used, fetch_reason = fetch_page_with_retries(
+                session,
                 url,
-                session=session,
+                session.headers,
                 timeout=args.request_timeout,
                 max_retries=args.max_retries,
-                retry_backoff=args.retry_backoff,
+                base_backoff=args.retry_backoff,
             )
             if (not html or len(html) < 5000) and selenium_enabled:
                 if not is_driver_alive(driver):
                     driver = make_driver(headless=args.headless)
                 html = selenium_fetch_page(url, driver)
-                meta = {"status_code": 200, "attempts": meta.get("attempts", 1), "reason": "selenium_fallback"}
+                status_code = 200
+                attempts_used = attempts_used or 1
+                fetch_reason = "selenium_fallback"
 
             details = parse_card_details(
                 html,

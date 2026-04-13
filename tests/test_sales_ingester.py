@@ -1,15 +1,23 @@
 import json
 import sqlite3
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from populate_db import ensure_runtime_schema
 from sales_ingester import (
+    build_requests_cookie_jar,
     extract_tcgplayer_product_id,
+    fetch_all_latest_sales_json,
+    ingest_latest_sales_pages,
     ingest_latest_sales,
+    load_exported_session,
     load_sales_targets,
     insert_sales_rows,
+    merge_latest_sales_payloads,
     normalize_latest_sales_payload,
+    prepare_profile_clone,
     sale_fingerprint,
     should_initial_backfill,
     target_has_completed_sales_backfill,
@@ -132,6 +140,162 @@ class TestSalesIngester(unittest.TestCase):
         self.assertEqual(rows[0]["quantity"], 1)
         self.assertTrue(rows[0]["sale_fingerprint"])
         self.assertEqual(rows[0]["sale_fingerprint"], sale_fingerprint(rows[0]))
+
+    def test_merge_latest_sales_payloads_combines_pages(self):
+        page1 = {
+            "previousPage": "",
+            "nextPage": 2,
+            "resultCount": 2,
+            "totalResults": 4,
+            "data": [
+                {"orderDate": "2026-03-28T12:00:00Z", "purchasePrice": 10.0, "shippingPrice": 0.5, "title": "A"},
+                {"orderDate": "2026-03-28T13:00:00Z", "purchasePrice": 11.0, "shippingPrice": 0.5, "title": "B"},
+            ],
+        }
+        page2 = {
+            "previousPage": 1,
+            "nextPage": "",
+            "resultCount": 2,
+            "totalResults": 4,
+            "data": [
+                {"orderDate": "2026-03-28T14:00:00Z", "purchasePrice": 12.0, "shippingPrice": 0.5, "title": "C"},
+                {"orderDate": "2026-03-28T15:00:00Z", "purchasePrice": 13.0, "shippingPrice": 0.5, "title": "D"},
+            ],
+        }
+        payload, source = merge_latest_sales_payloads([(page1, "requests"), (page2, "requests")])
+        self.assertEqual(source, "requests")
+        self.assertEqual(payload["totalResults"], 4)
+        self.assertEqual(payload["resultCount"], 4)
+        self.assertEqual(len(payload["data"]), 4)
+
+    def test_fetch_all_latest_sales_json_follows_next_page(self):
+        page1 = {
+            "previousPage": "",
+            "nextPage": 2,
+            "resultCount": 2,
+            "totalResults": 4,
+            "data": [
+                {"orderDate": "2026-03-28T12:00:00Z", "purchasePrice": 10.0, "shippingPrice": 0.5, "title": "A"},
+                {"orderDate": "2026-03-28T13:00:00Z", "purchasePrice": 11.0, "shippingPrice": 0.5, "title": "B"},
+            ],
+        }
+        page2 = {
+            "previousPage": 1,
+            "nextPage": "",
+            "resultCount": 2,
+            "totalResults": 4,
+            "data": [
+                {"orderDate": "2026-03-28T14:00:00Z", "purchasePrice": 12.0, "shippingPrice": 0.5, "title": "C"},
+                {"orderDate": "2026-03-28T15:00:00Z", "purchasePrice": 13.0, "shippingPrice": 0.5, "title": "D"},
+            ],
+        }
+        with patch("sales_ingester.fetch_latest_sales_json", side_effect=[(page1, "requests"), (page2, "requests")]) as mocked:
+            payload, source = fetch_all_latest_sales_json(593294, use_browser_fallback=False, headless=True)
+        self.assertEqual(source, "requests")
+        self.assertEqual(payload["resultCount"], 4)
+        self.assertEqual(len(payload["data"]), 4)
+        self.assertEqual(mocked.call_count, 2)
+
+    def test_fetch_all_latest_sales_json_passes_profile_args(self):
+        page = {
+            "previousPage": "",
+            "nextPage": "",
+            "resultCount": 1,
+            "totalResults": 1,
+            "data": [{"orderDate": "2026-03-28T12:00:00Z", "purchasePrice": 10.0, "shippingPrice": 0.5, "title": "A"}],
+        }
+        with patch("sales_ingester.fetch_latest_sales_json", return_value=(page, "selenium")) as mocked:
+            payload, source = fetch_all_latest_sales_json(
+                593294,
+                use_browser_fallback=True,
+                headless=False,
+                user_data_dir="/tmp/tcgplayer-profile",
+                profile_directory="Default",
+            )
+        self.assertEqual(source, "selenium")
+        self.assertEqual(payload["resultCount"], 1)
+        self.assertEqual(mocked.call_args.kwargs["user_data_dir"], "/tmp/tcgplayer-profile")
+        self.assertEqual(mocked.call_args.kwargs["profile_directory"], "Default")
+
+    def test_fetch_all_latest_sales_json_uses_offset_paging_with_session_file(self):
+        page1 = {
+            "previousPage": "",
+            "nextPage": "Yes",
+            "resultCount": 25,
+            "totalResults": 40,
+            "data": [{"orderDate": f"2026-03-28T12:{i:02d}:00Z", "purchasePrice": 10.0 + i, "shippingPrice": 0.5, "title": f"A{i}"} for i in range(25)],
+        }
+        page2 = {
+            "previousPage": "",
+            "nextPage": "",
+            "resultCount": 15,
+            "totalResults": 40,
+            "data": [{"orderDate": f"2026-03-29T12:{i:02d}:00Z", "purchasePrice": 20.0 + i, "shippingPrice": 0.5, "title": f"B{i}"} for i in range(15)],
+        }
+        with patch("sales_ingester.fetch_latest_sales_json", side_effect=[(page1, "requests"), (page2, "requests")]) as mocked:
+            payload, source = fetch_all_latest_sales_json(
+                242811,
+                use_browser_fallback=False,
+                headless=True,
+                session_file="/tmp/tcgplayer_session.json",
+            )
+        self.assertEqual(source, "requests")
+        self.assertEqual(payload["resultCount"], 40)
+        self.assertEqual(payload["totalResults"], 40)
+        self.assertEqual(len(payload["data"]), 40)
+        self.assertEqual(mocked.call_count, 2)
+        self.assertEqual(mocked.call_args_list[0].kwargs["offset"], 0)
+        self.assertEqual(mocked.call_args_list[0].kwargs["limit"], 25)
+        self.assertEqual(mocked.call_args_list[1].kwargs["offset"], 25)
+        self.assertEqual(mocked.call_args_list[1].kwargs["limit"], 25)
+
+    def test_prepare_profile_clone_copies_local_state_and_profile(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_root = root / "source"
+            source_profile = source_root / "Default"
+            source_profile.mkdir(parents=True)
+            (source_root / "Local State").write_text('{"ok":true}', encoding="utf-8")
+            (source_profile / "Cookies").write_text("cookie-data", encoding="utf-8")
+            clone_root, clone_profile = prepare_profile_clone(str(source_root), "Default")
+            try:
+                clone_root = Path(clone_root)
+                self.assertEqual(clone_profile, "Default")
+                self.assertTrue((clone_root / "Local State").exists())
+                self.assertEqual((clone_root / "Default" / "Cookies").read_text(encoding="utf-8"), "cookie-data")
+            finally:
+                import shutil
+
+                shutil.rmtree(clone_root, ignore_errors=True)
+
+    def test_load_exported_session_and_cookie_jar(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_path = Path(tmpdir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "cookies": [
+                            {
+                                "name": "TCGAuthTicket_Production",
+                                "value": "secret",
+                                "domain": ".tcgplayer.com",
+                                "path": "/",
+                                "secure": True,
+                                "httpOnly": True,
+                                "sameSite": "Lax",
+                            }
+                        ],
+                        "local_storage": {"foo": "bar"},
+                        "session_storage": {"baz": "qux"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            session = load_exported_session(str(session_path))
+            self.assertEqual(session["local_storage"]["foo"], "bar")
+            self.assertEqual(session["session_storage"]["baz"], "qux")
+            jar = build_requests_cookie_jar(str(session_path))
+            self.assertEqual(jar.get("TCGAuthTicket_Production"), "secret")
 
     def test_insert_sales_rows_ignores_duplicate_fingerprints(self):
         conn = self.make_conn()
@@ -352,6 +516,46 @@ class TestSalesIngester(unittest.TestCase):
         ).fetchone()
         self.assertIsNotNone(refresh_row[0])
         self.assertIsNotNone(refresh_row[1])
+
+    def test_ingest_latest_sales_pages_inserts_chunk_by_chunk(self):
+        conn = self.make_conn()
+        conn.execute(
+            "UPDATE products SET url = ? WHERE id = 1",
+            ("https://www.tcgplayer.com/product/593294/test-product",),
+        )
+        page1 = {
+            "previousPage": "",
+            "nextPage": "Yes",
+            "resultCount": 2,
+            "totalResults": 3,
+            "data": [
+                {"orderDate": "2026-03-28T12:00:00Z", "purchasePrice": 10.0, "shippingPrice": 0.5, "title": "A"},
+                {"orderDate": "2026-03-28T13:00:00Z", "purchasePrice": 11.0, "shippingPrice": 0.5, "title": "B"},
+            ],
+        }
+        page2 = {
+            "previousPage": "",
+            "nextPage": "",
+            "resultCount": 1,
+            "totalResults": 3,
+            "data": [
+                {"orderDate": "2026-03-28T14:00:00Z", "purchasePrice": 12.0, "shippingPrice": 0.5, "title": "C"},
+            ],
+        }
+        with patch("sales_ingester.iter_latest_sales_pages", return_value=iter([(page1, "requests"), (page2, "requests")])):
+            result = ingest_latest_sales_pages(
+                conn,
+                internal_product_id=1,
+                tcgplayer_product_id=593294,
+                resolved_url="https://www.tcgplayer.com/product/593294/test-product",
+                sale_date="2026-03-28",
+            )
+        self.assertEqual(result["fetch_source"], "requests")
+        self.assertEqual(result["pages_processed"], 2)
+        self.assertEqual(result["fetched_rows"], 3)
+        self.assertEqual(result["inserted_rows"], 3)
+        count = conn.execute("SELECT COUNT(*) FROM sales WHERE product_id = 1").fetchone()[0]
+        self.assertEqual(count, 3)
 
     def test_first_card_backfill_only_happens_once_even_with_no_sales(self):
         conn = self.make_card_conn()

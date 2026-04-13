@@ -375,11 +375,12 @@ HTML_PAGE = """<!doctype html>
 
           <div class="form-block">
             <h3>Catalog Refresh</h3>
-            <p class="help">Choose how to update the TCGplayer sealed product list before a scrape. Newest uses the page count and merges in new links without dupes. Complete Fresh and Reconcile always scan the full catalog. Set workers above 1 to fan out the page crawl.</p>
+            <p class="help">Choose how to update the TCGplayer sealed product list before a scrape. Newest uses the page count and merges in new links without dupes. Complete Rewrite and Reconcile always scan the full catalog. Results now write straight into the database instead of a CSV handoff file.</p>
             <div class="grid2">
               <div><label for="catalog-pages">Pages</label><input id="catalog-pages" type="number" min="1" value="3" /></div>
-              <div><label for="catalog-out">Output CSV</label><input id="catalog-out" type="text" value="products.csv" /></div>
               <div><label for="catalog-workers">Workers</label><input id="catalog-workers" type="number" min="1" value="4" /></div>
+              <div><label for="catalog-db">Database</label><input id="catalog-db" type="text" value="sealed_market.db" /></div>
+              <div><label for="catalog-date">Scrape Date</label><input id="catalog-date" type="date" /></div>
               <div><label for="catalog-category-slug">Category Slug</label><input id="catalog-category-slug" type="text" value="pokemon" /></div>
               <div><label for="catalog-product-line-name">Product Line</label><input id="catalog-product-line-name" type="text" value="pokemon" /></div>
               <div style="grid-column: 1 / -1;"><label for="catalog-product-type-name">Product Type</label><input id="catalog-product-type-name" type="text" value="Sealed Products" /></div>
@@ -389,31 +390,19 @@ HTML_PAGE = """<!doctype html>
             </div>
             <div class="toolbar">
               <button class="secondary" id="catalog-newest">Newest Links Refresh</button>
-              <button class="secondary" id="catalog-fresh">Complete Fresh Refresh</button>
+              <button class="secondary" id="catalog-fresh">Complete Rewrite</button>
               <button class="secondary" id="catalog-reconcile">Reconcile Catalog</button>
             </div>
           </div>
 
           <div class="form-block">
-            <h3>Card Catalog Load</h3>
-            <p class="help">Keep cards separate from sealed for now. First scrape a card CSV with Card filters, then load that CSV into the `card_products` table.</p>
-            <div class="grid2">
-              <div><label for="card-catalog-db">Database</label><input id="card-catalog-db" type="text" value="sealed_market.db" /></div>
-              <div><label for="card-catalog-csv">Card CSV</label><input id="card-catalog-csv" type="text" value="pokemon_cards.csv" /></div>
-              <div><label for="card-catalog-category-slug">Category Slug</label><input id="card-catalog-category-slug" type="text" value="pokemon" /></div>
-              <div><label for="card-catalog-product-line-name">Product Line</label><input id="card-catalog-product-line-name" type="text" value="pokemon" /></div>
-              <div style="grid-column: 1 / -1;"><label for="card-catalog-source">Source</label><input id="card-catalog-source" type="text" value="TCGplayer Cards" /></div>
-            </div>
-            <button class="secondary" id="run-card-catalog">Load Card Catalog</button>
-          </div>
-
-          <div class="form-block">
             <h3>Pokemon Cards Catalog Refresh</h3>
-            <p class="help">Dedicated card discovery flow. This keeps the card crawl separate from sealed and writes to a separate CSV before loading into `card_products`.</p>
+            <p class="help">Dedicated card discovery flow. This keeps the card crawl separate from sealed and writes directly into `card_products`.</p>
             <div class="grid2">
               <div><label for="cards-pages">Pages</label><input id="cards-pages" type="number" min="1" value="5" /></div>
-              <div><label for="cards-out">Output CSV</label><input id="cards-out" type="text" value="pokemon_cards.csv" /></div>
               <div><label for="cards-workers">Workers</label><input id="cards-workers" type="number" min="1" value="4" /></div>
+              <div><label for="cards-db">Database</label><input id="cards-db" type="text" value="sealed_market.db" /></div>
+              <div><label for="cards-date">Scrape Date</label><input id="cards-date" type="date" /></div>
               <div><label for="cards-category-slug">Category Slug</label><input id="cards-category-slug" type="text" value="pokemon" /></div>
               <div><label for="cards-product-line-name">Product Line</label><input id="cards-product-line-name" type="text" value="pokemon" /></div>
               <div style="grid-column: 1 / -1;"><label for="cards-product-type-name">Product Type</label><input id="cards-product-type-name" type="text" value="Cards" /></div>
@@ -423,7 +412,7 @@ HTML_PAGE = """<!doctype html>
             </div>
             <div class="toolbar">
               <button class="secondary" id="cards-newest">Newest Card Links Refresh</button>
-              <button class="secondary" id="cards-fresh">Complete Fresh Card Refresh</button>
+              <button class="secondary" id="cards-fresh">Complete Card Rewrite</button>
               <button class="secondary" id="cards-reconcile">Reconcile Card Catalog</button>
               <button class="primary" id="run-card-pipeline">Run Card Expansion Pipeline</button>
             </div>
@@ -441,6 +430,7 @@ HTML_PAGE = """<!doctype html>
               <div><label for="sales-limit">Limit</label><input id="sales-limit" type="number" min="0" value="0" /></div>
               <div style="grid-column: 1 / -1;"><label for="sales-product-url">Product URL</label><input id="sales-product-url" type="text" value="" /></div>
               <div style="grid-column: 1 / -1;"><label for="sales-snapshot-file">Snapshot File</label><input id="sales-snapshot-file" type="text" value="" /></div>
+              <div style="grid-column: 1 / -1;"><label for="sales-session-file">Authenticated Session File</label><input id="sales-session-file" type="text" value="" /></div>
             </div>
             <div class="checks">
               <label><input id="sales-all-dates" type="checkbox" /> Ingest all returned dates</label>
@@ -461,6 +451,7 @@ HTML_PAGE = """<!doctype html>
               <div><label for="card-sales-workers">Workers</label><input id="card-sales-workers" type="number" min="1" value="4" /></div>
               <div><label for="card-sales-limit">Limit</label><input id="card-sales-limit" type="number" min="0" value="0" /></div>
               <div style="grid-column: 1 / -1;"><label for="card-sales-product-url">Product URL</label><input id="card-sales-product-url" type="text" value="" /></div>
+              <div style="grid-column: 1 / -1;"><label for="card-sales-session-file">Authenticated Session File</label><input id="card-sales-session-file" type="text" value="" /></div>
             </div>
             <div class="checks">
               <label><input id="card-sales-all-dates" type="checkbox" /> Ingest all returned dates</label>
@@ -547,11 +538,15 @@ HTML_PAGE = """<!doctype html>
     const state = { activeJobId: null, pollTimer: null, lastRenderedLog: "" };
 
     function setTodayDefault() {
-      const input = document.getElementById("scrape-date");
-      if (!input.value) {
-        const now = new Date();
-        const localDate = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
-        input.value = localDate.toISOString().slice(0, 10);
+      const ids = ["scrape-date", "catalog-date", "cards-date"];
+      const now = new Date();
+      const localDate = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
+      const value = localDate.toISOString().slice(0, 10);
+      for (const id of ids) {
+        const input = document.getElementById(id);
+        if (input && !input.value) {
+          input.value = value;
+        }
       }
     }
 
@@ -715,8 +710,9 @@ HTML_PAGE = """<!doctype html>
 
       function catalogArgs(mode) {
         return {
+          db: getText("catalog-db"),
+          scrape_date: getText("catalog-date"),
           pages: getNumber("catalog-pages"),
-          out: getText("catalog-out"),
           category_slug: getText("catalog-category-slug"),
           product_line_name: getText("catalog-product-line-name"),
           product_type_name: getText("catalog-product-type-name"),
@@ -750,24 +746,11 @@ HTML_PAGE = """<!doctype html>
         }
       });
 
-      document.getElementById("run-card-catalog").addEventListener("click", async () => {
-        try {
-          await startJob("card_catalog", {
-            db: getText("card-catalog-db"),
-            csv: getText("card-catalog-csv"),
-            category_slug: getText("card-catalog-category-slug"),
-            product_line_name: getText("card-catalog-product-line-name"),
-            source: getText("card-catalog-source")
-          });
-        } catch (error) {
-          alert(error.message);
-        }
-      });
-
       function cardsCatalogArgs(mode) {
         return {
+          db: getText("cards-db"),
+          scrape_date: getText("cards-date"),
           pages: getNumber("cards-pages"),
-          out: getText("cards-out"),
           category_slug: getText("cards-category-slug"),
           product_line_name: getText("cards-product-line-name"),
           product_type_name: getText("cards-product-type-name"),
@@ -812,18 +795,21 @@ HTML_PAGE = """<!doctype html>
       document.getElementById("run-sales").addEventListener("click", async () => {
         try {
           const workers = getNumber("sales-workers");
+          const sessionFile = getText("sales-session-file");
+          const allDates = getChecked("sales-all-dates");
           await startJob("sales", {
             db: getText("sales-db"),
             source: getText("sales-source"),
             product_id: getNumber("sales-product-id"),
             product_url: getText("sales-product-url"),
             sale_date: getText("sales-date"),
-            all_dates: getChecked("sales-all-dates"),
+            all_dates: allDates,
             limit: workers > 1 ? 0 : getNumber("sales-limit"),
             workers,
-            browser_fallback: getChecked("sales-browser-fallback"),
+            browser_fallback: getChecked("sales-browser-fallback") && !(sessionFile && allDates),
             headless: getChecked("sales-headless"),
-            snapshot_file: getText("sales-snapshot-file")
+            snapshot_file: getText("sales-snapshot-file"),
+            session_file: sessionFile
           });
         } catch (error) {
           alert(error.message);
@@ -833,17 +819,20 @@ HTML_PAGE = """<!doctype html>
       document.getElementById("run-card-sales").addEventListener("click", async () => {
         try {
           const workers = getNumber("card-sales-workers");
+          const sessionFile = getText("card-sales-session-file");
+          const allDates = getChecked("card-sales-all-dates");
           await startJob("card_sales", {
             db: getText("card-sales-db"),
             source: getText("card-sales-source"),
             product_id: getNumber("card-sales-product-id"),
             product_url: getText("card-sales-product-url"),
             sale_date: getText("card-sales-date"),
-            all_dates: getChecked("card-sales-all-dates"),
+            all_dates: allDates,
             limit: workers > 1 ? 0 : getNumber("card-sales-limit"),
             workers,
-            browser_fallback: getChecked("card-sales-browser-fallback"),
-            headless: getChecked("card-sales-headless")
+            browser_fallback: getChecked("card-sales-browser-fallback") && !(sessionFile && allDates),
+            headless: getChecked("card-sales-headless"),
+            session_file: sessionFile
           });
         } catch (error) {
           alert(error.message);
@@ -1053,10 +1042,14 @@ def build_command(job_type, args):
                 python,
                 "batch_workers.py",
                 "catalog",
-                "--out",
-                args.get("out", "products.csv"),
+                "--db",
+                args.get("db", "sealed_market.db"),
+                "--target-kind",
+                "sealed",
                 "--mode",
                 args.get("mode", "fresh"),
+                "--scrape-date",
+                args.get("scrape_date", ""),
                 "--category-slug",
                 args.get("category_slug", "pokemon"),
                 "--product-line-name",
@@ -1066,9 +1059,9 @@ def build_command(job_type, args):
                 "--workers",
                 str(workers),
                 "--wait-time",
-                str(int(args.get("wait_time", 20))),
+                str(int(args.get("wait_time", 60 if args.get("mode", "fresh") in {"fresh", "reconcile"} else 35))),
                 "--page-load-timeout",
-                str(int(args.get("page_load_timeout", 25))),
+                str(int(args.get("page_load_timeout", 70 if args.get("mode", "fresh") in {"fresh", "reconcile"} else 40))),
                 "--retries",
                 str(int(args.get("retries", 1))),
             ]
@@ -1082,11 +1075,13 @@ def build_command(job_type, args):
 
         command = [
             python,
-            "link_scraper.py",
-            "--out",
-            args.get("out", "products.csv"),
+            "sealed_catalog_refresh.py",
+            "--db",
+            args.get("db", "sealed_market.db"),
             "--mode",
             args.get("mode", "fresh"),
+            "--scrape-date",
+            args.get("scrape_date", ""),
             "--category-slug",
             args.get("category_slug", "pokemon"),
             "--product-line-name",
@@ -1094,9 +1089,9 @@ def build_command(job_type, args):
             "--product-type-name",
             args.get("product_type_name", "Sealed Products"),
             "--wait-time",
-            str(int(args.get("wait_time", 20))),
+            str(int(args.get("wait_time", 60 if args.get("mode", "fresh") in {"fresh", "reconcile"} else 35))),
             "--page-load-timeout",
-            str(int(args.get("page_load_timeout", 25))),
+            str(int(args.get("page_load_timeout", 70 if args.get("mode", "fresh") in {"fresh", "reconcile"} else 40))),
             "--retries",
             str(int(args.get("retries", 1))),
         ]
@@ -1113,6 +1108,7 @@ def build_command(job_type, args):
         product_id = int(args.get("product_id", 0) or 0)
         product_url = args.get("product_url", "").strip()
         snapshot_file = args.get("snapshot_file", "").strip()
+        session_file = args.get("session_file", "").strip()
 
         if workers > 1 and not product_id and not product_url and not snapshot_file:
             command = [
@@ -1128,6 +1124,8 @@ def build_command(job_type, args):
                 "--limit",
                 str(int(args.get("limit", 0))),
             ]
+            if session_file:
+                command.extend(["--session-file", session_file])
             if args.get("all_dates"):
                 command.append("--all-dates")
             else:
@@ -1154,6 +1152,8 @@ def build_command(job_type, args):
             command.extend(["--product-url", product_url])
         if snapshot_file:
             command.extend(["--snapshot-file", snapshot_file])
+        if session_file:
+            command.extend(["--session-file", session_file])
         command.extend(["--limit", str(int(args.get("limit", 0)))])
         if args.get("all_dates"):
             command.append("--all-dates")
@@ -1171,6 +1171,7 @@ def build_command(job_type, args):
         workers = max(1, int(args.get("workers", 1) or 1))
         product_id = int(args.get("product_id", 0) or 0)
         product_url = args.get("product_url", "").strip()
+        session_file = args.get("session_file", "").strip()
 
         if workers > 1 and not product_id and not product_url:
             command = [
@@ -1188,6 +1189,8 @@ def build_command(job_type, args):
                 "--limit",
                 str(int(args.get("limit", 0))),
             ]
+            if session_file:
+                command.extend(["--session-file", session_file])
             if args.get("all_dates"):
                 command.append("--all-dates")
             else:
@@ -1214,6 +1217,8 @@ def build_command(job_type, args):
             command.extend(["--product-id", str(product_id)])
         if product_url:
             command.extend(["--product-url", product_url])
+        if session_file:
+            command.extend(["--session-file", session_file])
         command.extend(["--limit", str(int(args.get("limit", 0)))])
         if args.get("all_dates"):
             command.append("--all-dates")
@@ -1227,22 +1232,6 @@ def build_command(job_type, args):
             command.append("--headless")
         return command
 
-    if job_type == "card_catalog":
-        return [
-            python,
-            "card_catalog_refresh.py",
-            "--db",
-            args.get("db", "sealed_market.db"),
-            "--csv",
-            args.get("csv", "pokemon_cards.csv"),
-            "--category-slug",
-            args.get("category_slug", "pokemon"),
-            "--product-line-name",
-            args.get("product_line_name", "pokemon"),
-            "--source",
-            args.get("source", "TCGplayer Cards"),
-        ]
-
     if job_type == "card_catalog_scrape":
         workers = max(1, int(args.get("workers", 1) or 1))
         if workers > 1:
@@ -1250,10 +1239,14 @@ def build_command(job_type, args):
                 python,
                 "batch_workers.py",
                 "catalog",
-                "--out",
-                args.get("out", "pokemon_cards.csv"),
+                "--db",
+                args.get("db", "sealed_market.db"),
+                "--target-kind",
+                "cards",
                 "--mode",
                 args.get("mode", "fresh"),
+                "--scrape-date",
+                args.get("scrape_date", ""),
                 "--category-slug",
                 args.get("category_slug", "pokemon"),
                 "--product-line-name",
@@ -1263,9 +1256,9 @@ def build_command(job_type, args):
                 "--workers",
                 str(workers),
                 "--wait-time",
-                "20",
+                str(int(args.get("wait_time", 60 if args.get("mode", "fresh") in {"fresh", "reconcile"} else 35))),
                 "--page-load-timeout",
-                "25",
+                str(int(args.get("page_load_timeout", 70 if args.get("mode", "fresh") in {"fresh", "reconcile"} else 40))),
                 "--retries",
                 "1",
             ]
@@ -1279,11 +1272,14 @@ def build_command(job_type, args):
 
         command = [
             python,
-            "link_scraper.py",
-            "--out",
-            args.get("out", "pokemon_cards.csv"),
+            "card_catalog_refresh.py",
+            "--db",
+            args.get("db", "sealed_market.db"),
+            "--scrape",
             "--mode",
             args.get("mode", "fresh"),
+            "--scrape-date",
+            args.get("scrape_date", ""),
             "--category-slug",
             args.get("category_slug", "pokemon"),
             "--product-line-name",
@@ -1291,9 +1287,9 @@ def build_command(job_type, args):
             "--product-type-name",
             args.get("product_type_name", "Cards"),
             "--wait-time",
-            "20",
+            str(int(args.get("wait_time", 60 if args.get("mode", "fresh") in {"fresh", "reconcile"} else 35))),
             "--page-load-timeout",
-            "25",
+            str(int(args.get("page_load_timeout", 70 if args.get("mode", "fresh") in {"fresh", "reconcile"} else 40))),
             "--retries",
             "1",
         ]
@@ -1311,8 +1307,6 @@ def build_command(job_type, args):
             "card_pipeline.py",
             "--db",
             args.get("db", "sealed_market.db"),
-            "--csv",
-            args.get("out", "pokemon_cards.csv"),
             "--category-slug",
             args.get("category_slug", "pokemon"),
             "--product-line-name",
@@ -1323,6 +1317,8 @@ def build_command(job_type, args):
             str(max(1, int(args.get("workers", 1) or 1))),
             "--mode",
             args.get("mode", "fresh"),
+            "--scrape-date",
+            args.get("scrape_date", ""),
         ]
         if args.get("all_pages"):
             command.append("--all")

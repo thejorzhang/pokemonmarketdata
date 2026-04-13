@@ -26,7 +26,7 @@ def run_step(command):
 def main():
     parser = argparse.ArgumentParser(description="Run the card expansion pipeline")
     parser.add_argument("--db", default="sealed_market.db")
-    parser.add_argument("--csv", default="pokemon_cards.csv")
+    parser.add_argument("--scrape-date", default="")
     parser.add_argument("--category-slug", default="pokemon")
     parser.add_argument("--product-line-name", default="pokemon")
     parser.add_argument("--product-type-name", default="Cards")
@@ -43,10 +43,14 @@ def main():
         sys.executable,
         "batch_workers.py",
         "catalog",
-        "--out",
-        args.csv,
+        "--db",
+        args.db,
+        "--target-kind",
+        "cards",
         "--mode",
         args.mode,
+        "--scrape-date",
+        args.scrape_date,
         "--category-slug",
         args.category_slug,
         "--product-line-name",
@@ -56,9 +60,9 @@ def main():
         "--workers",
         str(args.workers),
         "--wait-time",
-        "20",
+        "35",
         "--page-load-timeout",
-        "25",
+        "40",
         "--retries",
         "1",
     ]
@@ -68,21 +72,6 @@ def main():
         catalog_command.extend(["--pages", str(args.pages)])
     if args.headless:
         catalog_command.append("--headless")
-
-    load_command = [
-        sys.executable,
-        "card_catalog_refresh.py",
-        "--db",
-        args.db,
-        "--csv",
-        args.csv,
-        "--category-slug",
-        args.category_slug,
-        "--product-line-name",
-        args.product_line_name,
-        "--source",
-        args.catalog_source,
-    ]
 
     details_command = [
         sys.executable,
@@ -103,7 +92,6 @@ def main():
         details_command.append("--headless")
 
     run_step(catalog_command)
-    run_step(load_command)
     run_step(details_command)
     print("Card pipeline completed successfully.", flush=True)
     return 0

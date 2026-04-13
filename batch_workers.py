@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 import tempfile
+import uuid
 from pathlib import Path
 
 from db import is_sqlite_target, resolve_database_target
@@ -176,31 +177,66 @@ def build_card_details_worker_command(args, shard_index, shard_count):
     return command
 
 
-def build_catalog_worker_command(args, shard_index, shard_count, output_path):
-    command = [
-        "python3",
-        "link_scraper.py",
-        "--out",
-        str(output_path),
-        "--mode",
-        "fresh",
-        "--category-slug",
-        args.category_slug,
-        "--product-line-name",
-        args.product_line_name,
-        "--product-type-name",
-        args.product_type_name,
-        "--wait-time",
-        str(args.wait_time),
-        "--page-load-timeout",
-        str(args.page_load_timeout),
-        "--retries",
-        str(args.retries),
-        "--shard-index",
-        str(shard_index),
-        "--shard-count",
-        str(shard_count),
-    ]
+def build_catalog_worker_command(args, shard_index, shard_count, refresh_token):
+    if args.target_kind == "cards":
+        command = [
+            "python3",
+            "card_catalog_refresh.py",
+            "--db",
+            args.db,
+            "--scrape",
+            "--mode",
+            args.mode,
+            "--refresh-token",
+            refresh_token,
+            "--category-slug",
+            args.category_slug,
+            "--product-line-name",
+            args.product_line_name,
+            "--product-type-name",
+            args.product_type_name,
+            "--scrape-date",
+            args.scrape_date,
+            "--wait-time",
+            str(args.wait_time),
+            "--page-load-timeout",
+            str(args.page_load_timeout),
+            "--retries",
+            str(args.retries),
+            "--shard-index",
+            str(shard_index),
+            "--shard-count",
+            str(shard_count),
+        ]
+    else:
+        command = [
+            "python3",
+            "sealed_catalog_refresh.py",
+            "--db",
+            args.db,
+            "--mode",
+            args.mode,
+            "--refresh-token",
+            refresh_token,
+            "--category-slug",
+            args.category_slug,
+            "--product-line-name",
+            args.product_line_name,
+            "--product-type-name",
+            args.product_type_name,
+            "--scrape-date",
+            args.scrape_date,
+            "--wait-time",
+            str(args.wait_time),
+            "--page-load-timeout",
+            str(args.page_load_timeout),
+            "--retries",
+            str(args.retries),
+            "--shard-index",
+            str(shard_index),
+            "--shard-count",
+            str(shard_count),
+        ]
     if args.all:
         command.append("--all")
     else:
@@ -208,6 +244,21 @@ def build_catalog_worker_command(args, shard_index, shard_count, output_path):
     if args.headless:
         command.append("--headless")
     return command
+
+
+def build_catalog_finalize_command(args, refresh_token):
+    script_name = "card_catalog_refresh.py" if args.target_kind == "cards" else "sealed_catalog_refresh.py"
+    return [
+        "python3",
+        script_name,
+        "--db",
+        args.db,
+        "--mode",
+        args.mode,
+        "--refresh-token",
+        refresh_token,
+        "--finalize-only",
+    ]
 
 
 def build_sales_worker_command(args, shard_index, shard_count):
@@ -239,6 +290,10 @@ def build_sales_worker_command(args, shard_index, shard_count):
         command.extend(["--product-url", args.product_url])
     if args.snapshot_file:
         command.extend(["--snapshot-file", args.snapshot_file])
+    if getattr(args, "session_file", ""):
+        command.extend(["--session-file", args.session_file])
+    if getattr(args, "browser_script_timeout", 0):
+        command.extend(["--browser-script-timeout", str(int(args.browser_script_timeout))])
     if args.all_dates:
         command.append("--all-dates")
     elif args.sale_date:
@@ -271,75 +326,29 @@ def plan_worker_commands(task, args, workers):
 
 def run_catalog_batch(args):
     workers = max(1, int(args.workers))
-    output_path = Path(args.out)
+    refresh_token = f"catalog-refresh-{uuid.uuid4().hex}"
 
     if workers == 1:
-        command = [
-            "python3",
-            "link_scraper.py",
-            "--out",
-            args.out,
-            "--mode",
-            args.mode,
-            "--wait-time",
-            str(args.wait_time),
-            "--page-load-timeout",
-            str(args.page_load_timeout),
-            "--retries",
-            str(args.retries),
-        ]
-        if args.all:
-            command.append("--all")
-        else:
-            command.extend(["--pages", str(args.pages)])
-        if args.headless:
-            command.append("--headless")
+        command = build_catalog_worker_command(args, 0, 1, refresh_token)
         if args.dry_run:
             print(f"worker 1/1: {shlex.join(command)}")
             return 0
         return subprocess.call(command, cwd=str(ROOT))
 
-    existing_products = read_catalog_csv(output_path)
-    with tempfile.TemporaryDirectory(prefix="catalog_batch_") as tempdir:
-        shard_outputs = []
-        commands = []
-        for index in range(workers):
-            shard_path = Path(tempdir) / f"catalog_shard_{index}.csv"
-            shard_outputs.append(shard_path)
-            commands.append(build_catalog_worker_command(args, index, workers, shard_path))
+    commands = [build_catalog_worker_command(args, index, workers, refresh_token) for index in range(workers)]
 
-        if args.dry_run:
-            for index, command in enumerate(commands, start=1):
-                print(f"worker {index}/{len(commands)}: {shlex.join(command)}")
-            return 0
-
-        exit_code = run_worker_group(commands)
-        if exit_code != 0:
-            return exit_code
-
-        live_products = merge_products(*(read_catalog_csv(path) for path in shard_outputs))
-        if args.mode == "newest":
-            final_products = merge_products(existing_products, live_products)
-            print(
-                f"[batch] newest merged {len(live_products)} live product(s) into {len(existing_products)} existing product(s)",
-                flush=True,
-            )
-        elif args.mode == "reconcile":
-            existing_urls = {url for _, url in existing_products}
-            live_urls = {url for _, url in live_products}
-            added = [product for product in live_products if product[1] not in existing_urls]
-            removed = [product for product in existing_products if product[1] not in live_urls]
-            print(
-                f"[batch] reconcile summary: {len(added)} added, {len(removed)} removed, {len(live_products)} current live products",
-                flush=True,
-            )
-            final_products = live_products
-        else:
-            final_products = live_products
-
-        write_catalog_csv(output_path, final_products)
-        print(f"[batch] saved {len(final_products)} products to {output_path}", flush=True)
+    if args.dry_run:
+        for index, command in enumerate(commands, start=1):
+            print(f"worker {index}/{len(commands)}: {shlex.join(command)}")
+        print(f"finalize: {shlex.join(build_catalog_finalize_command(args, refresh_token))}")
         return 0
+
+    exit_code = run_worker_group(commands)
+    if exit_code != 0:
+        return exit_code
+    finalize_command = build_catalog_finalize_command(args, refresh_token)
+    print(f"[batch] finalizing catalog refresh: {shlex.join(finalize_command)}", flush=True)
+    return subprocess.call(finalize_command, cwd=str(ROOT))
 
 
 def _prefix_output(label, process):
@@ -464,13 +473,15 @@ def make_parser():
     card_details.add_argument("--workers", type=int, default=4)
     card_details.add_argument("--dry-run", action="store_true")
 
-    catalog = subparsers.add_parser("catalog", help="Run batched sealed catalog refresh")
-    catalog.add_argument("--out", default="products.csv")
+    catalog = subparsers.add_parser("catalog", help="Run batched catalog refresh directly into the database")
+    catalog.add_argument("--db", default="sealed_market.db")
+    catalog.add_argument("--target-kind", choices=["sealed", "cards"], default="sealed")
     catalog.add_argument("--mode", choices=["fresh", "newest", "reconcile"], default="fresh")
+    catalog.add_argument("--scrape-date", default="")
     catalog.add_argument("--pages", type=int, default=3)
     catalog.add_argument("--all", action="store_true")
-    catalog.add_argument("--wait-time", type=int, default=20)
-    catalog.add_argument("--page-load-timeout", type=int, default=25)
+    catalog.add_argument("--wait-time", type=int, default=35)
+    catalog.add_argument("--page-load-timeout", type=int, default=40)
     catalog.add_argument("--retries", type=int, default=1)
     catalog.add_argument("--category-slug", default="pokemon")
     catalog.add_argument("--product-line-name", default="pokemon")
@@ -490,8 +501,10 @@ def make_parser():
     sales.add_argument("--sale-date", default="")
     sales.add_argument("--all-dates", action="store_true")
     sales.add_argument("--snapshot-file", default="")
+    sales.add_argument("--session-file", default="")
     sales.add_argument("--limit", type=int, default=0)
-    sales.add_argument("--commit-every", type=int, default=10)
+    sales.add_argument("--commit-every", type=int, default=1)
+    sales.add_argument("--browser-script-timeout", type=int, default=0)
     sales.add_argument("--no-browser-fallback", action="store_true")
     sales.add_argument("--headless", action="store_true")
     sales.add_argument("--workers", type=int, default=4)

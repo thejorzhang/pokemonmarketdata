@@ -70,10 +70,10 @@ class TestCardCatalogRefresh(unittest.TestCase):
         conn.commit()
 
         rows = conn.execute(
-            "SELECT tcgplayer_product_id, name, category_slug, product_line, set_name, source FROM card_products"
+            "SELECT tcgplayer_product_id, name, category_slug, product_line, set_name, source, catalog_scrape_date FROM card_products"
         ).fetchall()
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0], (123456, "Charizard ex Updated", "pokemon", "pokemon", None, "TCGplayer Cards"))
+        self.assertEqual(rows[0], (123456, "Charizard ex Updated", "pokemon", "pokemon", None, "TCGplayer Cards", None))
 
 
 if __name__ == "__main__":
