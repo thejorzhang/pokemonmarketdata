@@ -23,6 +23,7 @@ import hashlib
 from datetime import datetime
 import sys
 
+from collection_manager import ensure_collection_schema
 from db import (
     configure_connection as configure_db_connection,
     connect_database,
@@ -585,6 +586,7 @@ def ensure_runtime_schema(conn):
     c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_set_stats_set_id_unique ON set_stats (set_id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_set_stats_sales ON set_stats (sealed_sale_count, card_sale_count)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_set_stats_priority ON set_stats (priority_hot_count, priority_warm_count)")
+    ensure_collection_schema(conn)
     conn.commit()
 
 

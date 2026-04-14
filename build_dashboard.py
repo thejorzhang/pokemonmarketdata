@@ -9,6 +9,7 @@ import html
 import os
 from datetime import datetime
 
+from collection_manager import DEFAULT_COLLECTION_NAME, fetch_collection_summary
 from db import configure_connection, connect_database, resolve_database_target, table_exists
 from analyze_outliers import (
     build_product_histories,
@@ -108,6 +109,13 @@ def fetch_set_stats(conn, limit=20):
     return c.fetchall()
 
 
+def fetch_collection_dashboard(conn, collection_name=DEFAULT_COLLECTION_NAME, limit=100):
+    try:
+        return fetch_collection_summary(conn, collection_name=collection_name, limit=limit)
+    except Exception:
+        return None
+
+
 def build_table(headers, rows):
     if not rows:
         return "<p class='empty'>No rows.</p>"
@@ -121,7 +129,7 @@ def build_table(headers, rows):
     return f"<table><thead><tr>{head_html}</tr></thead><tbody>{body_html}</tbody></table>"
 
 
-def render_dashboard(source, metrics, insights, latest_run, failure_breakdown, set_stats_rows):
+def render_dashboard(source, metrics, insights, latest_run, failure_breakdown, set_stats_rows, collection_summary=None):
     generated = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     with_history = sum(1 for m in metrics if m["history_points"] >= 2)
     empty_notice = ""
@@ -237,6 +245,51 @@ def render_dashboard(source, metrics, insights, latest_run, failure_breakdown, s
                     html.escape(row[12]),
                 )
                 for row in set_stats_rows
+            ],
+        )
+
+    collection_cards_html = "<p class='empty'>Add holdings to your collection to track value, cost basis, and movers.</p>"
+    collection_items_html = "<p class='empty'>No collection items yet.</p>"
+    collection_movers_html = "<p class='empty'>No collection movers yet.</p>"
+    if collection_summary and collection_summary.get("item_count", 0) > 0:
+        collection_cards_html = f"""
+        <div class="grid">
+          <div class="card"><div class="k">Collection Items</div><div class="v">{collection_summary['item_count']}</div></div>
+          <div class="card"><div class="k">Total Units</div><div class="v">{collection_summary['total_units']:.2f}</div></div>
+          <div class="card"><div class="k">Estimated Value</div><div class="v">{fmt_money(collection_summary['estimated_value'])}</div></div>
+          <div class="card"><div class="k">Cost Basis</div><div class="v">{fmt_money(collection_summary['cost_basis'])}</div></div>
+          <div class="card"><div class="k">Unrealized PnL</div><div class="v">{fmt_money(collection_summary['unrealized_pnl'])}</div></div>
+          <div class="card"><div class="k">Unrealized Return</div><div class="v">{fmt_pct(collection_summary['unrealized_pct'])}</div></div>
+        </div>
+        """
+        collection_items_html = build_table(
+            ["Product", "Kind", "Qty", "Unit Cost", "Current Unit", "Current Value", "PnL", "Move", "Source"],
+            [
+                (
+                    f"<a href='{html.escape(item['url'] or '#')}' target='_blank' rel='noreferrer'>{html.escape(item['name'] or '-')}</a>",
+                    html.escape(item["target_kind"]),
+                    f"{item['quantity']:.2f}",
+                    fmt_money(item["unit_cost"]),
+                    fmt_money(item["current_unit_value"]),
+                    fmt_money(item["current_value"]),
+                    fmt_money(item["unrealized_pnl"]),
+                    fmt_pct(item["change_pct"]),
+                    html.escape(item["price_source"] or "-"),
+                )
+                for item in collection_summary["items"][:25]
+            ],
+        )
+        collection_movers_html = build_table(
+            ["Product", "Kind", "Move", "Current Value", "Valuation Date"],
+            [
+                (
+                    html.escape(item["name"] or "-"),
+                    html.escape(item["target_kind"]),
+                    fmt_pct(item["change_pct"]),
+                    fmt_money(item["current_value"]),
+                    html.escape(item["valuation_date"] or "-"),
+                )
+                for item in collection_summary["top_movers"]
             ],
         )
 
@@ -384,6 +437,20 @@ def render_dashboard(source, metrics, insights, latest_run, failure_breakdown, s
     <h2>Set Overview</h2>
     {set_stats_html}
 
+    <h2>Collection Overview</h2>
+    {collection_cards_html}
+
+    <div class="split">
+      <div>
+        <h2>Collection Holdings</h2>
+        {collection_items_html}
+      </div>
+      <div>
+        <h2>Biggest Collection Movers</h2>
+        {collection_movers_html}
+      </div>
+    </div>
+
     <div class="split">
       <div>
         <h2>Top Movers Up</h2>
@@ -425,7 +492,7 @@ def main():
         products = {}
         metrics = []
         insights = generate_insights(metrics, top_n=args.top, z_threshold=args.z_threshold)
-        html_content = render_dashboard(args.source, metrics, insights, latest_run, failures, [])
+        html_content = render_dashboard(args.source, metrics, insights, latest_run, failures, [], fetch_collection_dashboard(conn))
         output_dir = os.path.dirname(args.out) or "."
         os.makedirs(output_dir, exist_ok=True)
         with open(args.out, "w", encoding="utf-8") as f:
@@ -441,11 +508,12 @@ def main():
     latest_run = fetch_latest_run(conn, args.source)
     failures = fetch_failure_breakdown(conn, latest_run["id"]) if latest_run else []
     set_stats_rows = fetch_set_stats(conn, limit=50)
+    collection_summary = fetch_collection_dashboard(conn)
     conn.close()
 
     output_dir = os.path.dirname(args.out) or "."
     os.makedirs(output_dir, exist_ok=True)
-    html_content = render_dashboard(args.source, metrics, insights, latest_run, failures, set_stats_rows)
+    html_content = render_dashboard(args.source, metrics, insights, latest_run, failures, set_stats_rows, collection_summary)
     with open(args.out, "w", encoding="utf-8") as f:
         f.write(html_content)
     print(f"Wrote dashboard: {args.out}")

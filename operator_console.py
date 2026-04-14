@@ -20,6 +20,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from collection_manager import DEFAULT_COLLECTION_NAME, add_collection_item, fetch_collection_summary
+from db import configure_connection, connect_database, resolve_database_target
+from populate_db import ensure_runtime_schema
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_HOST = "127.0.0.1"
@@ -174,7 +177,7 @@ HTML_PAGE = """<!doctype html>
       text-transform: uppercase;
       letter-spacing: 0.06em;
     }
-    input[type="text"], input[type="number"], input[type="date"] {
+    input[type="text"], input[type="number"], input[type="date"], select, textarea {
       width: 100%;
       padding: 10px 12px;
       border-radius: 10px;
@@ -182,6 +185,58 @@ HTML_PAGE = """<!doctype html>
       background: #fff;
       color: var(--ink);
       font: inherit;
+    }
+    textarea { min-height: 74px; resize: vertical; }
+    .inline-note {
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .summary-grid {
+      display: grid;
+      gap: 10px;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      margin-top: 12px;
+    }
+    .summary-card {
+      background: #f4ecdc;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 10px 12px;
+    }
+    .summary-card .k {
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 6px;
+    }
+    .summary-card .v {
+      font-size: 18px;
+      font-weight: 700;
+    }
+    .collection-table {
+      margin-top: 12px;
+      overflow-x: auto;
+    }
+    .collection-table table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    .collection-table th,
+    .collection-table td {
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      white-space: nowrap;
+    }
+    .collection-table th {
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
     }
     .checks {
       display: flex;
@@ -497,6 +552,35 @@ HTML_PAGE = """<!doctype html>
             <button class="secondary" id="run-card-details">Run Batched Card Details Refresh</button>
           </div>
 
+          <div class="form-block">
+            <h3>Collection</h3>
+            <p class="help">Track holdings against the current market data. This is the first consumer-facing layer: add products to a collection, then watch estimated value, cost basis, and biggest movers.</p>
+            <div class="grid2">
+              <div><label for="collection-db">Database</label><input id="collection-db" type="text" value="sealed_market.db" /></div>
+              <div><label for="collection-name">Collection Name</label><input id="collection-name" type="text" value="My Collection" /></div>
+              <div>
+                <label for="collection-target-kind">Target Kind</label>
+                <select id="collection-target-kind">
+                  <option value="sealed" selected>sealed</option>
+                  <option value="cards">cards</option>
+                </select>
+              </div>
+              <div><label for="collection-tcgplayer-id">TCGplayer Product ID</label><input id="collection-tcgplayer-id" type="number" min="0" value="0" /></div>
+              <div><label for="collection-quantity">Quantity</label><input id="collection-quantity" type="number" min="0.01" step="0.01" value="1" /></div>
+              <div><label for="collection-unit-cost">Unit Cost</label><input id="collection-unit-cost" type="number" min="0" step="0.01" value="" /></div>
+              <div><label for="collection-acquired-at">Acquired Date</label><input id="collection-acquired-at" type="date" /></div>
+              <div><label for="collection-product-url">Product URL</label><input id="collection-product-url" type="text" value="" /></div>
+              <div style="grid-column: 1 / -1;"><label for="collection-notes">Notes</label><textarea id="collection-notes"></textarea></div>
+            </div>
+            <div class="toolbar">
+              <button class="secondary" id="collection-refresh">Refresh Collection</button>
+              <button class="primary" id="collection-add">Add to Collection</button>
+            </div>
+            <div class="inline-note" id="collection-flash">No collection loaded yet.</div>
+            <div id="collection-summary"></div>
+            <div class="collection-table" id="collection-items"></div>
+          </div>
+
           <div class="links">
             <a href="/dashboard/mvp_dashboard.html" target="_blank" rel="noreferrer">Open dashboard output</a>
           </div>
@@ -674,6 +758,79 @@ HTML_PAGE = """<!doctype html>
 
     function getChecked(id) {
       return document.getElementById(id).checked;
+    }
+
+    function fmtMoney(value) {
+      if (value === null || value === undefined || Number.isNaN(Number(value))) {
+        return "-";
+      }
+      return Number(value).toLocaleString(undefined, { style: "currency", currency: "USD" });
+    }
+
+    function fmtPct(value) {
+      if (value === null || value === undefined || Number.isNaN(Number(value))) {
+        return "-";
+      }
+      return `${Number(value).toFixed(2)}%`;
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function renderCollection(payload) {
+      const summaryHost = document.getElementById("collection-summary");
+      const itemsHost = document.getElementById("collection-items");
+      const flash = document.getElementById("collection-flash");
+      const summary = payload.summary || null;
+      if (!summary || !summary.item_count) {
+        flash.textContent = `Collection "${getText("collection-name")}" is empty.`;
+        summaryHost.innerHTML = "";
+        itemsHost.innerHTML = "";
+        return;
+      }
+
+      flash.textContent = `Loaded ${summary.item_count} holding(s) from "${summary.collection_name}".`;
+      summaryHost.innerHTML = `
+        <div class="summary-grid">
+          <div class="summary-card"><div class="k">Items</div><div class="v">${summary.item_count}</div></div>
+          <div class="summary-card"><div class="k">Units</div><div class="v">${Number(summary.total_units || 0).toFixed(2)}</div></div>
+          <div class="summary-card"><div class="k">Est. Value</div><div class="v">${fmtMoney(summary.estimated_value)}</div></div>
+          <div class="summary-card"><div class="k">Cost Basis</div><div class="v">${fmtMoney(summary.cost_basis)}</div></div>
+          <div class="summary-card"><div class="k">Unrealized PnL</div><div class="v">${fmtMoney(summary.unrealized_pnl)}</div></div>
+          <div class="summary-card"><div class="k">Return</div><div class="v">${fmtPct(summary.unrealized_pct)}</div></div>
+        </div>
+      `;
+
+      const rows = (summary.items || []).slice(0, 12).map((item) => `
+        <tr>
+          <td>${item.url ? `<a href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">${escapeHtml(item.name || "-")}</a>` : escapeHtml(item.name || "-")}</td>
+          <td>${escapeHtml(item.target_kind || "-")}</td>
+          <td>${Number(item.quantity || 0).toFixed(2)}</td>
+          <td>${fmtMoney(item.unit_cost)}</td>
+          <td>${fmtMoney(item.current_unit_value)}</td>
+          <td>${fmtMoney(item.current_value)}</td>
+          <td>${fmtPct(item.change_pct)}</td>
+          <td>${escapeHtml(item.price_source || "-")}</td>
+        </tr>
+      `).join("");
+      itemsHost.innerHTML = rows
+        ? `<table><thead><tr><th>Product</th><th>Kind</th><th>Qty</th><th>Unit Cost</th><th>Current Unit</th><th>Current Value</th><th>Move</th><th>Source</th></tr></thead><tbody>${rows}</tbody></table>`
+        : "";
+    }
+
+    async function refreshCollection() {
+      const params = new URLSearchParams({
+        db: getText("collection-db"),
+        name: getText("collection-name") || "My Collection"
+      });
+      const payload = await api(`/api/collection?${params.toString()}`);
+      renderCollection(payload);
     }
 
     function wireEvents() {
@@ -875,6 +1032,37 @@ HTML_PAGE = """<!doctype html>
         }
       });
 
+      document.getElementById("collection-refresh").addEventListener("click", async () => {
+        try {
+          await refreshCollection();
+        } catch (error) {
+          alert(error.message);
+        }
+      });
+
+      document.getElementById("collection-add").addEventListener("click", async () => {
+        try {
+          const payload = await api("/api/collection/items", {
+            method: "POST",
+            body: JSON.stringify({
+              db: getText("collection-db"),
+              collection_name: getText("collection-name") || "My Collection",
+              target_kind: getText("collection-target-kind"),
+              tcgplayer_product_id: getNumber("collection-tcgplayer-id"),
+              product_url: getText("collection-product-url"),
+              quantity: Number(document.getElementById("collection-quantity").value || "1"),
+              unit_cost: document.getElementById("collection-unit-cost").value,
+              acquired_at: getText("collection-acquired-at"),
+              notes: getText("collection-notes")
+            })
+          });
+          document.getElementById("collection-flash").textContent = `Added ${payload.item?.name || "item"} to "${payload.summary?.collection_name || getText("collection-name")}".`;
+          renderCollection(payload);
+        } catch (error) {
+          alert(error.message);
+        }
+      });
+
       document.getElementById("refresh-status").addEventListener("click", refreshStatus);
       document.getElementById("stop-job").addEventListener("click", async () => {
         try {
@@ -892,6 +1080,7 @@ HTML_PAGE = """<!doctype html>
     setTodayDefault();
     setYesterdayDefault();
     wireEvents();
+    refreshCollection().catch(() => {});
     refreshStatus();
   </script>
 </body>
@@ -1474,6 +1663,19 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/status":
             self._send_json(STORE.snapshot())
             return
+        if parsed.path == "/api/collection":
+            query = parse_qs(parsed.query or "")
+            db = (query.get("db") or ["sealed_market.db"])[0]
+            name = (query.get("name") or [DEFAULT_COLLECTION_NAME])[0]
+            conn = connect_database(resolve_database_target(db))
+            try:
+                configure_connection(conn)
+                ensure_runtime_schema(conn)
+                summary = fetch_collection_summary(conn, collection_name=name)
+            finally:
+                conn.close()
+            self._send_json({"ok": True, "summary": summary})
+            return
         if parsed.path.startswith("/dashboard/"):
             self._serve_file(ROOT / parsed.path.lstrip("/"))
             return
@@ -1501,6 +1703,40 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                 return
             self._send_json({"ok": True, "job": job})
+            return
+        if parsed.path == "/api/collection/items":
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length).decode("utf-8") if length else "{}"
+            payload = json.loads(raw or "{}")
+            db = payload.get("db", "sealed_market.db")
+            conn = connect_database(resolve_database_target(db))
+            try:
+                configure_connection(conn)
+                ensure_runtime_schema(conn)
+                item = add_collection_item(
+                    conn,
+                    collection_name=payload.get("collection_name") or DEFAULT_COLLECTION_NAME,
+                    target_kind=payload.get("target_kind") or "sealed",
+                    tracked_product_id=int(payload.get("tracked_product_id") or 0),
+                    tcgplayer_product_id=int(payload.get("tcgplayer_product_id") or 0),
+                    product_url=(payload.get("product_url") or "").strip(),
+                    quantity=float(payload.get("quantity") or 1),
+                    unit_cost=payload.get("unit_cost"),
+                    acquired_at=(payload.get("acquired_at") or "").strip(),
+                    notes=(payload.get("notes") or "").strip(),
+                )
+                summary = fetch_collection_summary(conn, collection_name=payload.get("collection_name") or DEFAULT_COLLECTION_NAME)
+            except ValueError as exc:
+                conn.close()
+                self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            finally:
+                if conn:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+            self._send_json({"ok": True, "item": item, "summary": summary})
             return
         self._send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
 

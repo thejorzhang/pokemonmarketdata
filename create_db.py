@@ -7,6 +7,7 @@ rewriting every call site.
 
 import argparse
 
+from collection_manager import ensure_collection_schema
 from db import (
     configure_connection,
     connect_database,
@@ -505,6 +506,7 @@ def create_schema(conn):
     c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_scrape_activity_target_unique ON scrape_activity (target_kind, target_id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_scrape_activity_set_due ON scrape_activity (set_id, next_due_at)")
 
+    ensure_collection_schema(conn)
     conn.commit()
 
 
